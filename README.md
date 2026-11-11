@@ -6,6 +6,27 @@ DotProd y FP16. Desde 0.3.3 se usa **solo CPU**; GPU está deshabilitada tras un
 bloqueo completo del S23 Ultra durante una prueba. NPU sin activar.
 Pocket TTS queda fuera del proyecto.
 
+## Versión 0.3.6: convoluciones CPU y comparaciones Q8
+
+[**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.6/Mi-Voz-Local-Android-arm64.apk)
+
+Instalar encima, sin desinstalar. Conserva certificado, voces, modelos e historial.
+
+- Convoluciones 1D: reparto en bloques contiguos de canales para reducir escrituras
+  intercaladas entre hilos. Conserva tipos, valores y conversión FP16 de GGML.
+  Las formas no elegibles siguen usando la ruta original.
+- Dos variantes opcionales y experimentales: **Q8_0 + códec BF16** (2,44 GB en
+  archivos) y **Q4_K_M + códec Q8_0** (1,51 GB). Cambian un componente respecto
+  del híbrido Q4 + BF16 para comparar calidad, tiempo y memoria por separado.
+  Usan pesos compatibles de la revisión ya fijada, verificados con SHA-256.
+- Preparar cada variante reutiliza archivos descargados cuando es posible. No
+  cambia el modelo seleccionado ni inicia descargas automáticamente. Los prompts
+  ICL permanecen separados; se comparte el embedding cuando el Talker es el mismo.
+
+La optimización de CPU no modifica los pesos ni los parámetros de muestreo. Las
+variantes Q8 sí cambian precisión y requieren escucha; no se garantiza que una
+variante sea más rápida o mejor en todas las referencias. GPU sigue deshabilitada.
+
 ## Versión 0.3.5: decodificador y trabajadores CPU
 
 [**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.5/Mi-Voz-Local-Android-arm64.apk)
@@ -171,6 +192,8 @@ Para repetir el guion se usa Copiar texto original por separado.
 | 0.6B BF16 | 2,20 GB |
 | 1.7B BF16 | 4,24 GB |
 | 1.7B Q4 + códec BF16 | 1,58 GB |
+| 1.7B Q8 + códec BF16 | 2,44 GB |
+| 1.7B Q4 + códec Q8 | 1,51 GB |
 
 GB decimales, no RAM requerida. BF16 es precisión de 16 bits, no F32. Se descarga
 solo la variante elegida y el códec se comparte por precisión. Las voces regionales

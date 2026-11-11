@@ -1212,7 +1212,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun speakerEmbeddingFor(native: QwenEngine, voice: VoiceProfileEntity, variant: ModelVariant): String {
         val reference = File(voice.referenceWavPath)
         check(reference.isFile) { "No se encuentra la referencia de ${voice.name}. Volvé a importar esa voz." }
-        val embeddingVariantId = if (variant.id == "1_7b_q4_bf16_codec") "1_7b_q4_k_m" else variant.id
+        val embeddingVariantId = if (variant.talker == QwenModel.variantById("1_7b_q4_k_m").talker) "1_7b_q4_k_m" else variant.id
         val embedding = File(reference.parentFile, "speaker-$embeddingVariantId.json")
         if (!embedding.isFile || embedding.length() == 0L) {
             val success = native.extractSpeakerEmbedding(reference.absolutePath, embedding.absolutePath)

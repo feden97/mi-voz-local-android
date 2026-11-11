@@ -166,6 +166,8 @@ def apply_native_patches(root: Path = ROOT, check_only: bool = False) -> None:
     print("Native CPU/diagnostic/cancellation patches: verified" if check_only else "Native CPU/diagnostic/cancellation patches: ready")
     from patch_cpu_runtime import apply
     apply(root, check_only)
+    from patch_im2col import apply as apply_im2col
+    apply_im2col(root, check_only)
 
 
 if __name__ == "__main__":

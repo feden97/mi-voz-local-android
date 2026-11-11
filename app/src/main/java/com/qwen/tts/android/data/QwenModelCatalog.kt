@@ -41,6 +41,15 @@ internal object QwenModel {
         "ea393ebaf2167ea23ce9fc18b093822851358a950d7075cd47ab4f6ce23e887d",
     )
 
+    private val talker17Q8 = file(
+        "qwen-talker-1.7b-base-Q8_0.gguf", 2_079_448_256L,
+        "4b9a33a236908dd9435a42f7a396e38038329d053b704342a6413c08544c4fda",
+    )
+    private val tokenizerQ8 = file(
+        "qwen-tokenizer-12hz-Q8_0.gguf", 291_150_624L,
+        "1883beeed99348fc35e23dd225e9082f93f6f8c109330a33d935baa8acdbfd94",
+    )
+
     val defaultVariant = ModelVariant(
         id = "q4_k_m", displayName = "0.6B Base · Q4_K_M", storageGroup = "q4_k_m", quantized = true,
         talker = file("qwen-talker-0.6b-base-Q4_K_M.gguf", 628_905_056L,
@@ -48,7 +57,7 @@ internal object QwenModel {
         tokenizer = tokenizerQ4,
     )
 
-    val variants = listOf(
+    private val baseVariants = listOf(
         defaultVariant,
         ModelVariant(
             id = "0_6b_bf16", displayName = "0.6B Base · BF16 sin cuantizar", storageGroup = "bf16", quantized = false,
@@ -74,6 +83,19 @@ internal object QwenModel {
             tokenizer = tokenizerBf16,
         ),
     )
+
+    private val comparisonVariants = listOf(
+        ModelVariant(
+            id = "1_7b_q8_bf16_codec", displayName = "1.7B Base · Q8_0 + códec BF16 · experimental",
+            storageGroup = "q8_bf16_codec", quantized = true, talker = talker17Q8, tokenizer = tokenizerBf16,
+        ),
+        ModelVariant(
+            id = "1_7b_q4_q8_codec", displayName = "1.7B Base · Q4_K_M + códec Q8_0 · experimental",
+            storageGroup = "q4_q8_codec", quantized = true, talker = talker17Q4, tokenizer = tokenizerQ8,
+        ),
+    )
+
+    val variants = baseVariants + comparisonVariants
 
     fun variantById(id: String): ModelVariant =
         variants.firstOrNull { it.id == id } ?: defaultVariant

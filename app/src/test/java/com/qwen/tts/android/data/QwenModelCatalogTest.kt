@@ -13,7 +13,7 @@ class QwenModelCatalogTest {
             assertEquals(1, group.map { it.tokenizer }.distinct().size)
             assertEquals(1, group.map { it.quantized }.distinct().size)
         }
-        assertEquals(3, QwenModel.variants.map { it.storageGroup }.distinct().size)
+        assertEquals(5, QwenModel.variants.map { it.storageGroup }.distinct().size)
         val hybrid = QwenModel.variantById("1_7b_q4_bf16_codec")
         assertEquals(QwenModel.variantById("1_7b_q4_k_m").talker, hybrid.talker)
         assertEquals(QwenModel.variantById("1_7b_bf16").tokenizer, hybrid.tokenizer)
@@ -24,7 +24,7 @@ class QwenModelCatalogTest {
     @Test
     fun downloadsStayOnThePinnedRuntimeFormatAndHaveIndependentHashes() {
         val files = QwenModel.variants.flatMap { it.files }.distinct()
-        assertEquals(6, files.size) // Four talkers, two shared codecs.
+        assertEquals(8, files.size) // Five talkers, three shared codecs.
         assertEquals(files.size, files.map { it.sha256 }.distinct().size)
         files.forEach { file ->
             assertTrue(file.sha256.matches(Regex("[0-9a-f]{64}")))
@@ -40,5 +40,19 @@ class QwenModelCatalogTest {
         assertEquals(2_200_696_672L, QwenModel.variantById("0_6b_bf16").totalBytes)
         assertEquals(4_235_180_000L, QwenModel.variantById("1_7b_bf16").totalBytes)
         assertEquals(1_578_225_632L, QwenModel.variantById("1_7b_q4_bf16_codec").totalBytes)
+        assertEquals(2_438_428_640L, QwenModel.variantById("1_7b_q8_bf16_codec").totalBytes)
+        assertEquals(1_510_395_872L, QwenModel.variantById("1_7b_q4_q8_codec").totalBytes)
+    }
+
+    @Test
+    fun comparisonVariantsChangeOneComponentAtATime() {
+        val hybrid = QwenModel.variantById("1_7b_q4_bf16_codec")
+        val q8Talker = QwenModel.variantById("1_7b_q8_bf16_codec")
+        val q8Codec = QwenModel.variantById("1_7b_q4_q8_codec")
+        assertEquals(hybrid.tokenizer, q8Talker.tokenizer)
+        assertEquals(hybrid.talker, q8Codec.talker)
+        assertTrue(hybrid.talker != q8Talker.talker)
+        assertTrue(hybrid.tokenizer != q8Codec.tokenizer)
+        assertEquals(QwenModel.defaultVariant.id, QwenModel.variantById("unknown").id)
     }
 }
