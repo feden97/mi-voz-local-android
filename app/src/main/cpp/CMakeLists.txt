@@ -36,6 +36,19 @@ endif()
 set(GGML_OPENMP ${QWEN3_ANDROID_OPENMP} CACHE BOOL "" FORCE)
 set(GGML_VULKAN ${QWEN3_ANDROID_VULKAN} CACHE BOOL "" FORCE)
 set(GGML_OPENCL ${QWEN3_ANDROID_OPENCL} CACHE BOOL "" FORCE)
+if (QWEN3_ANDROID_OPENCL)
+    if (NOT EXISTS "${OpenCL_INCLUDE_DIR}/CL/cl.h")
+        message(FATAL_ERROR "OpenCL headers missing. Run python scripts/prepare_opencl.py before building.")
+    endif()
+    # The app must remain usable on CPU when the optional vendor driver is absent.
+    # Link GGML to our dispatch library, which loads libOpenCL.so only at runtime.
+    add_library(mivoz_opencl SHARED mivoz_opencl.cpp)
+    target_include_directories(mivoz_opencl PRIVATE "${OpenCL_INCLUDE_DIR}")
+    target_link_libraries(mivoz_opencl PRIVATE dl log)
+    set(OpenCL_LIBRARY mivoz_opencl CACHE STRING "Optional vendor OpenCL dispatch" FORCE)
+    set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "" FORCE)
+    set(GGML_OPENCL_USE_ADRENO_KERNELS ON CACHE BOOL "" FORCE)
+endif()
 if (QWEN3_ANDROID_VULKAN AND CMAKE_HOST_WIN32 AND NOT DEFINED GGML_VULKAN_HOST_C_COMPILER)
     file(GLOB _qwen3_msvc_cl
         "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe"

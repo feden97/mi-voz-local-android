@@ -23,13 +23,14 @@ class QwenEngine : AutoCloseable {
         val errorMsg: String?,
         val timeMs: Long,
     ) {
-        val tokenizeMs: Long = 0L
-        val encodeMs: Long = 0L
-        val generateMs: Long = 0L
-        val decodeMs: Long = 0L
-        val decodeFrames: Int = 0
-        val decodeSamples: Long = 0L
-        val decodeGraphComputeMs: Long = 0L
+        // The pinned JNI exposes only timeMs. Missing internal metrics are not zero-duration phases.
+        val tokenizeMs: Long? = null
+        val encodeMs: Long? = null
+        val generateMs: Long? = null
+        val decodeMs: Long? = null
+        val decodeFrames: Int? = null
+        val decodeSamples: Long? = null
+        val decodeGraphComputeMs: Long? = null
     }
 
     class NativeCapabilities(

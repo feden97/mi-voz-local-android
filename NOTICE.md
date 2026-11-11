@@ -9,6 +9,10 @@ La licencia original se conserva íntegra en `LICENSE`.
   revisión `4562731dc612cb87b4cd1eedac275a17d1078773`, MIT.
 - GGML: https://github.com/ggml-org/ggml,
   revisión `eced84c86f8b012c752c016f7fe789adea168e1e`, MIT.
+- Cabeceras y declaraciones OpenCL: https://github.com/KhronosGroup/OpenCL-Headers,
+  versión `v2025.07.22`, Apache 2.0. Licencia conservada en
+  `app/src/main/assets/licenses/OpenCL-Headers.txt`. El driver OpenCL del fabricante
+  no se distribuye en esta app.
 - Modelo Qwen3-TTS Base: https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base,
   Apache 2.0. Conversión utilizada: https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF.
 

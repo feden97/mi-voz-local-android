@@ -64,8 +64,11 @@ class GenerationForegroundService : Service() {
             } else {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             }
+            // ServiceCompat's API-34 mask strips mediaProcessing (API 35), passing
+            // NONE and causing InvalidForegroundServiceTypeException on Android 15+.
+            // minSdk is 31, so the platform's typed overload is available throughout.
             // Promote before waiting for state or preparing models.
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(null), type)
+            startForeground(NOTIFICATION_ID, notification(null), type)
             GenerationRuntime.foregroundServiceActive = true
             generationModel = GenerationRuntime.get(this)
             expectedStop = false

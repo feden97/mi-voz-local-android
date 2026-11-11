@@ -18,10 +18,17 @@ y otros procesadores compatibles; no se debe asumir que funciona en todo ARM64.
 `scripts/verify_native_build.py` comprueba los comandos efectivos para evitar que
 una compilación futura vuelva a perder esas optimizaciones.
 
-Todavía no se midió el tiempo de esta actualización en el teléfono. Optimizar la
-compilación no permite prometer un factor de mejora sin repetir la prueba.
+En esa revisión todavía no se había medido el tiempo de la actualización en el
+teléfono. Los registros recibidos el 11 de noviembre sí incluyen una ejecución
+completa 0.6B Q4, pero ninguna 1.7B completa. Ver
+[análisis y cambios 0.3.1](ANALISIS_REGISTROS_0_3_1.md).
+Optimizar la compilación no permite prometer un factor de mejora sin repetir la prueba.
 
 ## CPU, GPU e hilos
+
+Desde 0.3.2 se incluye **GPU OpenCL opcional** en Ajustes → Rendimiento, con CPU
+predeterminada. Ver [validación y procedimiento](VALIDACION_ANDROID_0_3_2.md).
+La descripción siguiente corresponde a la actualización inicial de CPU.
 
 Esta actualización sigue usando **CPU**. No activa automáticamente la GPU Adreno ni
 la NPU. Una integración Vulkan/OpenCL requeriría otra compilación y comprobar

@@ -1,5 +1,11 @@
 [
   {
+    "path": "gguf_loader.cpp",
+    "kind": "gpu_backend",
+    "upstream_sha256": "2867bc7846c4b4292a05ffde7495a014af0cb6e8e9afcf4c2916e7045ddad682",
+    "patched_sha256": "2a2e4b4c5961b066974faa12b69458e9273004d31e6da2fa3c697ae48d4f6d63"
+  },
+  {
     "path": "decoder/decoder_runtime.cpp",
     "kind": "compute",
     "upstream_sha256": "6279718aa699a00e81f2fa49b1ab7556089b3e6051ba8a552017180ba195f215",

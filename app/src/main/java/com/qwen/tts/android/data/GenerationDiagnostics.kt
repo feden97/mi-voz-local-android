@@ -29,6 +29,7 @@ internal class GenerationDiagnostics(
     maxAudioTokens: Int = 512,
     visibilityProvider: (() -> Boolean)? = null,
     foregroundServiceProvider: (() -> Boolean)? = null,
+    requestedBackend: String = "cpu",
 ) {
     private val app = context.applicationContext
     private val started = SystemClock.elapsedRealtime()
@@ -72,10 +73,13 @@ internal class GenerationDiagnostics(
             .put("engine", JSONObject().put("name", "qwen3-tts.cpp")
                 .put("revision", "4562731dc612cb87b4cd1eedac275a17d1078773")
                 .put("ggmlRevision", "eced84c86f8b012c752c016f7fe789adea168e1e")
-                .put("localChanges", "cooperative CPU cancellation; decode-phase event"))
-            .put("parameters", JSONObject().put("backend", backend).put("cpuThreads", cpuThreads)
+                .put("localChanges", "cooperative CPU cancellation; decode-phase event; optional OpenCL dispatch; generic GPU capability mask"))
+            .put("parameters", JSONObject().put("backend", backend).put("requestedBackend", requestedBackend).put("cpuThreads", cpuThreads)
                 .put("cloningMode", cloningMode).put("languageId", languageId)
                 .put("inputCharacters", textCharacters).put("plannedChunks", plannedChunks)
+                .put("chunking", JSONObject().put("maxCharactersPerChunk", TextChunks.CHUNK_CHARACTERS)
+                    .put("shortTextSingleChunk", true)
+                    .put("policy", "Keep short texts together; prefer natural boundaries for longer texts. Acoustic token limit is independent."))
                 .put("maxAudioTokensPerChunk", maxAudioTokens).put("secondsPerAcousticFrame", 0.08)
                 .put("nativeOptimization", "O3; NDEBUG; ARMv8.2-a+dotprod+fp16")
                 .put("sampling", JSONObject().put("temperature", 0.9).put("topP", 1.0).put("topK", 50)
@@ -91,12 +95,20 @@ internal class GenerationDiagnostics(
                 "Native heap allocated bytes exclude some memory mapped model weights and other allocations.",
                 "Battery temperature is not CPU/GPU/SoC temperature.",
                 "Memory and thermal peaks are observed samples; short peaks may be missed.",
+                "phaseMillis contains internal native timings; null means the pinned JNI does not expose that metric.",
+                "observedPhaseMillis measures wall time around the JNI call and its first decode event, including callback and JNI overhead. It does not isolate internal generation or decoder compute.",
+                "beforeDecodeEvent and afterDecodeEvent are null when no decode event was observed.",
+                "requestedBackend is the user selection; backend is the name reported by the engine after loading. A GPU backend may still execute some operations on CPU.",
             )))
     }
 
     @Synchronized
     fun setBackend(name: String) {
         report.getJSONObject("parameters").put("backend", name)
+        if (name.contains("OpenCL", ignoreCase = true) && !report.getJSONObject("model").optBoolean("quantized", true)) {
+            report.getJSONObject("parameters").put("gpuWeightPrecision", "FP16 (BF16 weights converted on OpenCL upload)")
+            warning("El backend OpenCL convierte los pesos BF16 a FP16 en GPU; no equivale a cálculo BF16 nativo.")
+        }
     }
 
     @Synchronized
@@ -181,7 +193,8 @@ internal class GenerationDiagnostics(
         sampleRate: Int,
         frames: Int? = null,
         warning: String? = null,
-        timings: Map<String, Long> = emptyMap(),
+        timings: Map<String, Long?> = emptyMap(),
+        observedTimings: Map<String, Long?> = emptyMap(),
     ) {
         if (chunks.length() >= 1_000) return
         val seconds = if (sampleRate > 0) audioSamples.toDouble() / sampleRate else 0.0
@@ -192,8 +205,13 @@ internal class GenerationDiagnostics(
         if (warning != null) entry.put("warning", DiagnosticFormatting.safeLabel(warning))
         if (timings.isNotEmpty()) {
             val details = JSONObject()
-            timings.forEach { (name, time) -> details.put(DiagnosticFormatting.safeLabel(name), time.coerceAtLeast(0)) }
+            timings.forEach { (name, time) -> details.put(DiagnosticFormatting.safeLabel(name), time?.coerceAtLeast(0) ?: JSONObject.NULL) }
             entry.put("phaseMillis", details)
+        }
+        if (observedTimings.isNotEmpty()) {
+            val details = JSONObject()
+            observedTimings.forEach { (name, time) -> details.put(DiagnosticFormatting.safeLabel(name), time?.coerceAtLeast(0) ?: JSONObject.NULL) }
+            entry.put("observedPhaseMillis", details)
         }
         chunks.put(entry)
     }
@@ -290,8 +308,13 @@ internal class GenerationDiagnostics(
             appendLine("Modelo: ${model.optString("name")} [${model.optString("id")}]")
             appendLine("Revisión de pesos: ${model.optString("revision")}")
             appendLine("Motor: ${parameters.optString("backend")} / ${parameters.optInt("cpuThreads")} hilos")
+            if (parameters.has("requestedBackend")) appendLine("Motor solicitado: ${parameters.optString("requestedBackend")}")
+            if (parameters.optString("requestedBackend") == "gpu") appendLine("El motor GPU puede ejecutar algunas operaciones en CPU; su nombre no indica que todo el trabajo ocurra en GPU.")
             appendLine("Modo de voz: ${parameters.optString("cloningMode")} / idioma ${parameters.optInt("languageId")}")
             appendLine("Entrada: ${parameters.optInt("inputCharacters")} caracteres / ${parameters.optInt("plannedChunks")} fragmentos previstos")
+            parameters.optJSONObject("chunking")?.let {
+                appendLine("Fragmentación: hasta ${it.optInt("maxCharactersPerChunk")} caracteres por llamada; textos cortos en una llamada y cortes naturales en textos largos.")
+            }
             val execution = value.optJSONObject("execution")
             if (execution != null) appendLine("Servicio de generación en segundo plano solicitado: ${execution.opt("backgroundServiceRequested")}")
             if (outcome == null) {
@@ -330,6 +353,10 @@ internal class GenerationDiagnostics(
             for (i in 0 until chunks.length()) {
                 val chunk = chunks.getJSONObject(i)
                 appendLine("- ${chunk.optInt("index")}: ${chunk.optInt("characters")} caracteres; ${chunk.optLong("nativeMillis")} ms nativos; ${"%.2f".format(Locale.US, chunk.optDouble("audioSeconds"))} s audio")
+                chunk.optJSONObject("observedPhaseMillis")?.let { observed ->
+                    fun measured(name: String): String = if (observed.isNull(name)) "sin dato" else "${observed.optLong(name)} ms"
+                    appendLine("  Tiempos observados: llamada JNI ${measured("nativeCall")}; antes del evento de decodificación ${measured("beforeDecodeEvent")}; después del evento ${measured("afterDecodeEvent")}.")
+                }
                 if (chunk.has("warning")) appendLine("  Aviso: ${chunk.optString("warning")}")
             }
             val warnings = value.getJSONArray("warnings")
@@ -341,6 +368,7 @@ internal class GenerationDiagnostics(
             appendLine()
             appendLine("No incluye audio, guion, transcripción, nombres de voz ni rutas privadas.")
             appendLine("La temperatura de batería no es la del procesador. Los máximos son muestras observadas; pueden perder picos breves.")
+            appendLine("Las fases internas no expuestas por JNI se guardan como null. Los tiempos observados incluyen JNI y callbacks; no aíslan el cálculo interno de cada fase.")
             appendLine("El JSON incluye hashes de modelos, capturas de memoria/térmica y todos los datos técnicos guardados.")
         }
     }

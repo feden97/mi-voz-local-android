@@ -1,4 +1,4 @@
-"""Apply audited cancellation transforms only to the pinned native source files.
+"""Apply audited cancellation and GPU transforms to the pinned native source files.
 
 The manifest checks normalized source hashes before and after each transform;
 patches are idempotent and refuse an unexpected upstream revision.
@@ -32,6 +32,18 @@ def digest(text: str) -> str:
 
 
 def transform(text: str, kind: str) -> str:
+    if kind == "gpu_backend":
+        mask = "#ifdef QWEN3_TTS_CUDA_ENABLED\n    mask |= 2; // CUDA\n#endif"
+        assert text.count(mask) == 1
+        text = text.replace(mask, "#if defined(QWEN3_TTS_CUDA_ENABLED) || defined(QWEN3_TTS_VULKAN_ENABLED) || defined(QWEN3_TTS_OPENCL_ENABLED)\n    mask |= 2; // GPU backend compiled\n#endif")
+        gpu = "    } else if (shared.preference == backend_preference::cuda) {\n        backend = init_backend_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);\n"
+        assert text.count(gpu) == 1
+        text = text.replace(gpu, gpu + "        if (!backend) backend = init_backend_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU);\n")
+        loader = "    const backend_preference preference = get_backend_preference();\n"
+        assert text.count(loader) == 1
+        text = text.replace(loader, loader + "    if (!backend && preference == backend_preference::cuda &&\n        preferred_backend_type != GGML_BACKEND_DEVICE_TYPE_CPU) {\n        backend = init_backend_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU);\n    }\n")
+        assert text.count("CUDA backend was requested") == 2
+        return text.replace("CUDA backend was requested", "GPU backend was requested")
     if kind == "compute":
         assert "ggml_backend_sched_graph_compute(" in text
         return INCLUDE + text.replace("ggml_backend_sched_graph_compute(", "mivoz_cancellation::compute(")
@@ -80,7 +92,7 @@ def apply_native_patches(root: Path = ROOT, check_only: bool = False) -> None:
             path.write_text(text, encoding="utf-8", newline="\n")
         if not header_ok:
             target_header.write_text(header, encoding="utf-8", newline="\n")
-    print("Native cancellation patches: verified" if check_only else "Native cancellation patches: ready")
+    print("Native cancellation/GPU patches: verified" if check_only else "Native cancellation/GPU patches: ready")
 
 
 if __name__ == "__main__":

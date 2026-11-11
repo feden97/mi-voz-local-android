@@ -8,6 +8,7 @@ import re
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--configuration", default="Debug")
+    parser.add_argument("--expect-opencl", action="store_true", help="Require optimized Adreno OpenCL and the optional vendor dispatch")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     databases = sorted((root / "app/.cxx" / args.configuration).glob("**/compile_commands.json"),
@@ -15,8 +16,15 @@ def main():
     if not databases:
         raise SystemExit("No native compilation database found")
     rows = json.loads(databases[0].read_text(encoding="utf-8"))
+    if args.expect_opencl:
+        loaders = [r for r in rows if r["file"].replace("\\", "/").endswith("/gguf_loader.cpp")]
+        if not loaders or any("QWEN3_TTS_OPENCL_ENABLED" not in r.get("command", " ".join(r.get("arguments", []))) for r in loaders):
+            raise SystemExit("GPU capability mask is missing the OpenCL compile definition in a GGUF loader")
     verified = {}
-    for filename in ("ggml-cpu.c", "ggml-quants.c", "transformer_runtime_code_pred.cpp", "decoder_runtime.cpp"):
+    filenames = ["ggml-cpu.c", "ggml-quants.c", "transformer_runtime_code_pred.cpp", "decoder_runtime.cpp"]
+    if args.expect_opencl:
+        filenames += ["ggml-opencl.cpp", "mivoz_opencl.cpp"]
+    for filename in filenames:
         row = next((r for r in rows if r["file"].replace("\\", "/").endswith("/" + filename)), None)
         if row is None:
             raise SystemExit(f"Missing native build command: {filename}")
@@ -27,6 +35,11 @@ def main():
         if filename == "ggml-cpu.c" and "-march=armv8.2-a+dotprod+fp16" not in command:
             raise SystemExit("CPU kernels are missing the S23 ARM instruction flags")
         verified[filename] = "-O3" + ("; ARMv8.2 DotProd/FP16" if filename == "ggml-cpu.c" else "")
+        if filename == "ggml-opencl.cpp":
+            for flag in ("GGML_OPENCL_EMBED_KERNELS", "GGML_OPENCL_USE_ADRENO_KERNELS"):
+                if not re.search(r"(?:^|\s)-D" + flag + r"(?:=1)?(?=\s|$)", command):
+                    raise SystemExit(f"OpenCL build is missing {flag}")
+            verified[filename] += "; embedded OpenCL kernels; Adreno kernels"
     print(json.dumps({"compilation_database": str(databases[0]), "verified": verified}, indent=2))
 
 

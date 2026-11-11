@@ -1,10 +1,33 @@
 # Mi Voz Local
 
 App Android personal para clonar voces autorizadas y generar audio en español dentro
-del teléfono. Destino: Samsung S23 Ultra de 12 GB. Backend CPU optimizado con O3,
-DotProd y FP16; GPU/NPU sin activar. Pocket TTS queda fuera del proyecto.
+del teléfono. Destino: Samsung S23 Ultra de 12 GB. CPU predeterminada con O3,
+DotProd y FP16; GPU OpenCL opcional y experimental. NPU sin activar.
+Pocket TTS queda fuera del proyecto.
 
-## Versión 0.3.0
+## Cambios locales 0.3.2-dev
+
+Selector **CPU / GPU experimental** en Ajustes → Rendimiento. Guarda la selección,
+libera el motor al cambiar y muestra el backend efectivo al cargar. OpenCL incluye
+kernels Adreno y carga el driver del teléfono de forma opcional, sin incorporarlo
+a la APK. Si GPU no puede iniciarse, elegir CPU manualmente; no se reintenta a
+escondidas. Puede ejecutar operaciones de apoyo en CPU.
+
+Para empezar, comparar **1.7B Q4_K_M**, la misma voz/texto y cuatro hilos. Después
+probar 1.7B BF16: OpenCL convierte esos pesos a FP16 al subirlos a GPU, y se indica
+en Ajustes y el registro. No se cambia el archivo del modelo descargado.
+[Validación y prueba GPU](docs/VALIDACION_ANDROID_0_3_2.md).
+
+## Cambios locales 0.3.1-dev
+
+Textos de hasta 350 caracteres en una pasada, cortes naturales y reparto de los
+últimos fragmentos para evitar colas muy cortas. Se corrigió el inicio del servicio
+`mediaProcessing` en Android 15+ y se añadieron tiempos observados de generación/
+decodificación; las métricas internas no disponibles ya no aparecen como cero.
+La APK local se genera en `artifacts/Mi-Voz-Local-Android-arm64.apk`.
+[Análisis de registros y próximas pruebas con 1.7B](docs/ANALISIS_REGISTROS_0_3_1.md).
+
+## Versión publicada 0.3.0
 
 [**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.0/Mi-Voz-Local-Android-arm64.apk)
 
@@ -12,7 +35,7 @@ Instalar encima, **sin desinstalar**, para conservar voces, modelos e historial.
 Mantiene el certificado y migra los datos sin borrarlos. Los audios anteriores muestran
 «Modelo no registrado»: esa información no se guardaba y no se infiere de los ajustes actuales.
 
-Compilación, **22 pruebas**, lint, firma, alineación y componentes del servicio verificados.
+En 0.3.0: compilación, **22 pruebas**, lint, firma, alineación y componentes del servicio verificados.
 Segundo plano, exportación y consumo de memoria necesitan probarse en el Samsung.
 [Validación completa](docs/VALIDACION_ANDROID_0_3.md).
 
@@ -21,7 +44,8 @@ Segundo plano, exportación y consumo de memoria necesitan probarse en el Samsun
 - Modelo, backend, hilos y modo de clonación guardados con cada resultado nuevo.
 - **Copiar texto original** desde resultado/historial y **Reutilizar en Estudio**.
 - Hasta **20.000 caracteres por trabajo**, con contador y fragmentación automática.
-  Cada llamada recibe hasta 220 caracteres; un término más largo debe separarse.
+  Los textos de hasta 350 caracteres se generan en una pasada. Los más largos se
+  dividen por párrafos/oraciones, hasta 350 por llamada; un término mayor debe separarse.
 - WAV incremental con pausas de 150 ms; cancelar conserva los fragmentos terminados
   como audio parcial. No se acumula todo el audio en memoria.
 - Reproducción desde archivo y liberación del motor después de terminar, fallar o cancelar.
@@ -96,6 +120,8 @@ ocultando un posible corte. Comprobar siempre la salida. No hay streaming durant
 Java 17, SDK 36, Build Tools 36, NDK 27.2.12479018, CMake 3.22.1 y ADB instalados.
 Ejecutar `scripts/build_android.ps1`: pruebas, lint, APK y validadores; deja
 `artifacts/Mi-Voz-Local-Android-arm64.apk`. Fuentes y pesos fijados por revisión y hashes.
+El script prepara también las cabeceras OpenCL fijadas. `-CpuOnly` genera una APK
+sin backend GPU en `artifacts/Mi-Voz-Local-Android-arm64-CPU.apk`.
 No quitar O3 ni los flags ARM; el binario es específico para procesadores compatibles.
 App `ar.com.mivozlocal.android`, mínimo API 31, target 36. La ruta PC sigue en espera.
 

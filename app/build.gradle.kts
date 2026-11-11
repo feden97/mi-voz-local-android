@@ -12,7 +12,7 @@ val qwenVulkan = providers.gradleProperty("qwen.vulkan")
     .orElse(false)
 val qwenOpencl = providers.gradleProperty("qwen.opencl")
     .map { it.equals("true", ignoreCase = true) }
-    .orElse(false)
+    .orElse(true)
 val qwenOpenclSdkDir = providers.gradleProperty("qwen.opencl.sdkDir")
     .orElse(layout.projectDirectory.dir("../build/opencl-sdk").asFile.absolutePath)
 val generatedOpenmpJniLibs = layout.buildDirectory.dir("generated/openmpJniLibs")
@@ -46,8 +46,8 @@ android {
         applicationId = "ar.com.mivozlocal.android"
         minSdk = 31
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0-dev"
+        versionCode = 5
+        versionName = "0.3.2-dev"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -91,7 +91,6 @@ android {
                     "-DQWEN3_ANDROID_VULKAN=${if (qwenVulkan.get()) "ON" else "OFF"}",
                     "-DQWEN3_ANDROID_OPENCL=${if (qwenOpencl.get()) "ON" else "OFF"}",
                     "-DOpenCL_INCLUDE_DIR=${qwenOpenclSdkDir.get()}/OpenCL-Headers",
-                    "-DOpenCL_LIBRARY=${qwenOpenclSdkDir.get()}/lib/arm64-v8a/libOpenCL.so",
                 )
             }
         }

@@ -160,6 +160,7 @@ private val languageOptions = listOf(
 
 private val backendOptions = listOf(
     BackendOption("cpu", "CPU", QwenEngine.BACKEND_CPU),
+    BackendOption("gpu", "GPU experimental", QwenEngine.BACKEND_GPU),
 )
 
 private val defaultBackendOption = backendOptions.first { it.id == "cpu" }
@@ -242,6 +243,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(
         QwenTtsUiState(
             selectedModelId = savedVariant.id,
+            selectedBackendId = backendOptionById(preferences.getString("backend-id", null).orEmpty()).id,
             backgroundGenerationEnabled = preferences.getBoolean("background-generation", true),
             modelReady = isModelReady(savedVariant),
             downloadTotalBytes = savedVariant.totalBytes,
@@ -317,9 +319,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateCpuThreads(value: Int) {
-        if (_uiState.value.busy) return
-        _uiState.update { it.copy(selectedCpuThreads = value, cpuThreads = value) }
-        synchronized(nativeLock) { if (!cleared.get()) engine?.setCpuThreads(value) }
+        if (_uiState.value.busy || recorderState.value.isRecording || _uiState.value.selectedCpuThreads == value) return
+        // GPU schedulers own auxiliary CPU backends configured when the model loads.
+        // Recreate the pipeline so the requested thread count applies to those too.
+        synchronized(nativeLock) {
+            engine?.close()
+            engine = null
+        }
+        _uiState.update { it.copy(selectedCpuThreads = value, cpuThreads = value, loaded = false,
+            activeBackendName = null, supportsCloning = null, speakerEmbeddingDim = 0,
+            status = "$value hilos seleccionados; cargá el modelo para aplicarlos") }
+    }
+
+    fun selectBackend(backendId: String) {
+        if (_uiState.value.busy || recorderState.value.isRecording) return
+        val option = backendOptionById(backendId)
+        if (_uiState.value.selectedBackendId == option.id) return
+        stopAudio()
+        synchronized(nativeLock) {
+            engine?.close()
+            engine = null
+        }
+        preferences.edit().putString("backend-id", option.id).apply()
+        _uiState.update { it.copy(selectedBackendId = option.id, loaded = false, activeBackendName = null,
+            supportsCloning = null, speakerEmbeddingDim = 0, error = null,
+            estimatedSynthesisMillis = null, estimateSampleCount = 0,
+            status = "${option.label} seleccionado; cargá el modelo para comprobarlo") }
     }
 
     fun updateLanguage(languageId: Int) {
@@ -466,12 +491,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val selectedVoice = _uiState.value.selectedVoiceId?.let { id -> voices.value.firstOrNull { it.voiceId == id } }
         val language = _uiState.value.selectedLanguageId
         val threads = selectedCpuThreadCount()
+        val requestedBackend = selectedBackendOption()
         stopAudio()
         backgroundFailure = null
         startBusy(status = "Preparando generación por fragmentos", resetSynthesis = true)
         val background = _uiState.value.backgroundGenerationEnabled
         _uiState.update { it.copy(plannedChunks = chunks.size, currentChunk = 0, resultModelName = variant.displayName,
-            resultBackend = "CPU", resultThreads = threads, resultMode = null, resultReportPath = null, resultStatus = null, resultText = text) }
+            resultBackend = null, resultThreads = threads, resultMode = null, resultReportPath = null, resultStatus = null, resultText = text) }
         if (background && !GenerationForegroundService.begin(getApplication())) {
             stopBusyTicker()
             _uiState.update { it.copy(busy = false, canCancel = false, status = "No se pudo iniciar el servicio; desactivá segundo plano para generar en pantalla.") }
@@ -484,7 +510,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var sampleCount = 0L
             var problem: Throwable? = null
             var truncated = false
-            var backend = "CPU"
+            var backend = "Sin confirmar"
             var mode = "default"
             var reportFile: File? = null
             var saved: GenerationEntity? = null
@@ -500,7 +526,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     diagnostics = GenerationDiagnostics(getApplication(), variant.id, variant.displayName, backend, threads,
                         mode, language, TextChunks.count(text), chunks.size,
                         visibilityProvider = { GenerationRuntime.isUiVisible },
-                        foregroundServiceProvider = { GenerationRuntime.foregroundServiceActive })
+                        foregroundServiceProvider = { GenerationRuntime.foregroundServiceActive },
+                        requestedBackend = requestedBackend.id)
                     val diagnostic = requireNotNull(diagnostics)
                     diagnostic.noteExecution(background)
                     diagnostic.capture("before_preparation", true)
@@ -516,8 +543,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             _uiState.update { it.copy(generationPhase = "Cargando modelo") }
                             ensureEngineLoaded(variant)
                             throwIfCancelRequested(native)
-                            backend = native.getActiveBackendName().orEmpty().ifBlank { "CPU" }
+                            backend = native.getActiveBackendName().orEmpty().ifBlank { "Sin confirmar" }
                             diagnostic.setBackend(backend)
+                            if (requestedBackend.id == "gpu" && backend.startsWith("CPU", ignoreCase = true)) {
+                                diagnostic.warning("Se solicitó GPU, pero el motor informó CPU como backend efectivo.")
+                            }
                             diagnostic.stage("preparation_and_load", SystemClock.elapsedRealtime() - preparation)
                             diagnostic.capture("model_ready", true)
                             _uiState.update { it.copy(resultBackend = backend, resultMode = mode) }
@@ -532,6 +562,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 var firstFrame = 0
                                 var lastAt = 0L
                                 var framesSeen = 0
+                                var decodeStartedAt: Long? = null
                                 _uiState.update { it.copy(currentChunk = index + 1, synthesisFrames = 0,
                                     generationPhase = "Generando fragmento ${index + 1}/${chunks.size}", etaLowMillis = null, etaHighMillis = null) }
                                 native.setProgressCallback { frames, maxTokens ->
@@ -539,6 +570,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     if (firstAt == 0L && frames > 0) { firstAt = now; firstFrame = frames }
                                     if (frames > 0) { framesSeen = frames; lastAt = now }
                                     val decoding = maxTokens == -1
+                                    if (decoding && decodeStartedAt == null) decodeStartedAt = now
                                     val estimate = if (!decoding) GenerationEstimate.remaining(TextChunks.count(chunk), frames,
                                         now - firstAt, frames - firstFrame, rates, tails) else null
                                     diagnostic.capture(if (decoding) "decode" else "generate")
@@ -551,8 +583,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         synthesisFrames = frames, maxAudioTokens = if (maxTokens >= 0) maxTokens else current.maxAudioTokens) }
                                 }
                                 val params = QwenEngine.NativeParams(languageId = language)
-                                val result = if (iclPrompt != null) native.synthesizeWithIclPrompt(chunk.trim(), iclPrompt.absolutePath, params)
-                                    else native.synthesize(chunk.trim(), speakerEmbeddingPath = embedding, params = params)
+                                val chunkText = chunk.trim()
+                                val nativeCallStartedAt = SystemClock.elapsedRealtime()
+                                val result = if (iclPrompt != null) native.synthesizeWithIclPrompt(chunkText, iclPrompt.absolutePath, params)
+                                    else native.synthesize(chunkText, speakerEmbeddingPath = embedding, params = params)
+                                val nativeCallReturnedAt = SystemClock.elapsedRealtime()
                                 throwIfCancelRequested(native)
                                 val audio = result.audio
                                 check(result.success && audio != null && audio.isNotEmpty()) { result.errorMsg ?: "El motor no produjo audio." }
@@ -565,7 +600,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     framesSeen, if (truncated) "acoustic_token_limit_reached" else null,
                                     timings = mapOf("tokenize" to result.tokenizeMs, "encode" to result.encodeMs,
                                         "generate" to result.generateMs, "decode" to result.decodeMs,
-                                        "decodeGraphCompute" to result.decodeGraphComputeMs))
+                                        "decodeGraphCompute" to result.decodeGraphComputeMs),
+                                    observedTimings = mapOf("nativeCall" to (nativeCallReturnedAt - nativeCallStartedAt),
+                                        "beforeDecodeEvent" to decodeStartedAt?.let { it - nativeCallStartedAt },
+                                        "afterDecodeEvent" to decodeStartedAt?.let { nativeCallReturnedAt - it }))
                                 diagnostic.checkpoint()
                                 if (truncated) { diagnostic.warning("Se alcanzó el límite acústico; se detuvo el trabajo para evitar omisiones silenciosas."); break }
                                 val duration = audio.size.toDouble() / result.sampleRate
@@ -947,7 +985,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "El modelo no está verificado. Descargalo o reparalo en Ajustes."
             }
         }
-        check(native.setBackendPreference(selectedBackendOption().preference)) { "No se pudo seleccionar el motor." }
+        configureBackend(native)
         native.setCpuThreads(selectedCpuThreadCount())
         // This call unloads the transformer/decoder; ensureEngineLoaded must run before synthesis.
         _uiState.update { it.copy(loaded = false, supportsCloning = null, status = "Cargando encoder de referencia") }
@@ -991,15 +1029,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         val native = engine ?: QwenEngine().also { engine = it }
-        val backend = selectedBackendOption()
-        if (!native.setBackendPreference(backend.preference)) {
-            error("No se pudo seleccionar ${backend.label}")
-        }
+        configureBackend(native)
         val threads = selectedCpuThreadCount()
         native.setCpuThreads(threads)
         if (!_uiState.value.loaded) {
             if (!native.loadModels(modelDirectory(variant).absolutePath, variant.talkerName)) {
-                error(native.getLastError() ?: "No se pudo cargar el modelo local")
+                val reason = native.getLastError() ?: "No se pudo cargar el modelo local"
+                error(if (selectedBackendOption().id == "gpu") "$reason. Podés volver a CPU en Ajustes → Rendimiento." else reason)
             }
             val caps = native.getModelCapabilities()
             _uiState.update {
@@ -1044,6 +1080,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun selectedBackendOption(): BackendOption =
         backendOptionById(_uiState.value.selectedBackendId)
+
+    private fun configureBackend(native: QwenEngine) {
+        val backend = selectedBackendOption()
+        check(backend.id != "gpu" || (native.getCompiledBackendMask() and 2) != 0) {
+            "Esta APK no incluye el motor GPU. Elegí CPU en Ajustes."
+        }
+        check(native.setBackendPreference(backend.preference)) {
+            "No se pudo seleccionar ${backend.label}. Liberá el modelo y volvé a cargarlo; también podés elegir CPU en Ajustes."
+        }
+    }
 
     private fun startBusy(
         status: String,
@@ -1816,6 +1862,7 @@ private fun SettingsScreen(viewModel: MainViewModel) {
         RuntimePanel(
             state = state,
             onCpuThreadsChange = viewModel::updateCpuThreads,
+            onBackendChange = viewModel::selectBackend,
         )
     }
 }
@@ -2078,6 +2125,7 @@ private fun ModelPanel(
 private fun RuntimePanel(
     state: QwenTtsUiState,
     onCpuThreadsChange: (Int) -> Unit,
+    onBackendChange: (String) -> Unit,
 ) {
     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2085,11 +2133,32 @@ private fun RuntimePanel(
                 Icon(Icons.Default.Tune, contentDescription = null)
                 Text("Rendimiento", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                backendOptions.forEach { option ->
+                    FilterChip(
+                        selected = state.selectedBackendId == option.id,
+                        onClick = { onBackendChange(option.id) },
+                        enabled = !state.busy,
+                        label = { Text(option.label) },
+                    )
+                }
+            }
             Text(
-                "Motor efectivo: ${state.activeBackendName ?: "CPU (se confirmará al cargar)"}",
+                "Motor efectivo: ${state.activeBackendName ?: "sin confirmar; cargá el modelo"}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (state.selectedBackendId == "gpu") {
+                Text("GPU es experimental: puede combinar trabajo en GPU y CPU. Si el teléfono no permite iniciarla, la carga falla; podés volver a CPU. Compará tiempo, memoria y el audio completo con CPU.", style = MaterialTheme.typography.bodySmall)
+                if (!QwenModel.variantById(state.selectedModelId).quantized) {
+                    Text("Con este modelo BF16, OpenCL convierte los pesos a FP16 en la GPU. Compará también la naturalidad con CPU.", style = MaterialTheme.typography.bodySmall)
+                }
+                if (state.activeBackendName?.startsWith("CPU", ignoreCase = true) == true) {
+                    Text("Se solicitó GPU, pero el motor informó CPU. Esta ejecución no confirma aceleración por GPU.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+            Text("Hilos de CPU (también se usan al elegir GPU)", style = MaterialTheme.typography.bodySmall)
             Text("Más hilos no garantizan menor tiempo: compará la misma frase y controlá el calentamiento.", style = MaterialTheme.typography.bodySmall)
             listOf(2, 4, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
               Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2161,7 +2230,7 @@ private fun GenerationStats(state: QwenTtsUiState) {
         Text(if (state.cancelling) "Cancelación solicitada; el motor debe detenerse antes de liberar la memoria." else state.generationPhase.ifBlank { state.status }, style = MaterialTheme.typography.bodySmall)
         Text("Fragmento ${state.currentChunk}/${state.plannedChunks} · tiempo total: ${formatDuration(state.operationElapsedMillis)}", style = MaterialTheme.typography.bodySmall)
         Text("Las estimaciones corresponden al fragmento actual, no al trabajo completo.", style = MaterialTheme.typography.bodySmall)
-        Text("${state.activeBackendName ?: "CPU"} · ${state.cpuThreads} hilos", style = MaterialTheme.typography.bodySmall)
+        Text("${state.activeBackendName ?: "Motor sin confirmar"} · ${state.cpuThreads} hilos", style = MaterialTheme.typography.bodySmall)
         if (state.synthesisFrames > 0) {
             Text("Audio estimado generado: ~${formatSeconds(generatedAudioSeconds)} (todavía sin decodificar)", style = MaterialTheme.typography.bodySmall)
         }
