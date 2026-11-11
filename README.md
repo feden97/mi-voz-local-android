@@ -2,21 +2,33 @@
 
 App Android personal para clonar voces autorizadas y generar audio en español dentro
 del teléfono. Destino: Samsung S23 Ultra de 12 GB. CPU predeterminada con O3,
-DotProd y FP16; GPU OpenCL opcional y experimental. NPU sin activar.
+DotProd y FP16. Desde 0.3.3 se usa **solo CPU**; GPU está deshabilitada tras un
+bloqueo completo del S23 Ultra durante una prueba. NPU sin activar.
 Pocket TTS queda fuera del proyecto.
 
-## Cambios locales 0.3.2-dev
+## Versión 0.3.3: solo CPU
 
-Selector **CPU / GPU experimental** en Ajustes → Rendimiento. Guarda la selección,
-libera el motor al cambiar y muestra el backend efectivo al cargar. OpenCL incluye
-kernels Adreno y carga el driver del teléfono de forma opcional, sin incorporarlo
-a la APK. Si GPU no puede iniciarse, elegir CPU manualmente; no se reintenta a
-escondidas. Puede ejecutar operaciones de apoyo en CPU.
+[**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.3/Mi-Voz-Local-Android-arm64.apk)
 
-Para empezar, comparar **1.7B Q4_K_M**, la misma voz/texto y cuatro hilos. Después
-probar 1.7B BF16: OpenCL convierte esos pesos a FP16 al subirlos a GPU, y se indica
-en Ajustes y el registro. No se cambia el archivo del modelo descargado.
-[Validación y prueba GPU](docs/VALIDACION_ANDROID_0_3_2.md).
+Instalar encima, sin desinstalar. Mantiene la firma, voces, modelos e historial.
+La selección GPU guardada por 0.3.2 pasa a CPU. El paquete no incluye backend GPU
+ni el enlace al driver OpenCL; Gradle y CMake rechazan habilitarlos en esta versión.
+
+Cuatro hilos siguen siendo la referencia para 1.7B. El diagnóstico de memoria ya
+no se ejecuta en el callback de síntesis: usa un muestreador independiente, también
+durante la decodificación. El último registro se guarda antes de empezar y cada
+30 segundos; incluye causas históricas de cierre si Android las facilita.
+Esto mejora observabilidad y reduce interferencia, sin prometer un gran aumento de
+velocidad ni continuidad garantizada bajo presión de memoria.
+[Análisis de las pruebas 4/6 hilos y validación](docs/VALIDACION_ANDROID_0_3_3.md).
+
+## 0.3.2 retirada de las pruebas
+
+El usuario informó un bloqueo de todo el teléfono que requirió reinicio forzado
+al activar GPU con 1.7B BF16. No repetir esa prueba en el equipo. No hay un registro
+GPU que identifique la causa; las comprobaciones estáticas de 0.3.2 no validaban el
+driver en el Samsung. Se conserva el [informe histórico](docs/VALIDACION_ANDROID_0_3_2.md)
+para trazabilidad, sin recomendar la APK ni las pruebas GPU.
 
 ## Cambios locales 0.3.1-dev
 
@@ -27,9 +39,9 @@ decodificación; las métricas internas no disponibles ya no aparecen como cero.
 La APK local se genera en `artifacts/Mi-Voz-Local-Android-arm64.apk`.
 [Análisis de registros y próximas pruebas con 1.7B](docs/ANALISIS_REGISTROS_0_3_1.md).
 
-## Versión publicada 0.3.0
+## Historial: 0.3.0
 
-[**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.0/Mi-Voz-Local-Android-arm64.apk)
+[Versiones publicadas](https://github.com/feden97/mi-voz-local-android/releases).
 
 Instalar encima, **sin desinstalar**, para conservar voces, modelos e historial.
 Mantiene el certificado y migra los datos sin borrarlos. Los audios anteriores muestran
@@ -120,8 +132,7 @@ ocultando un posible corte. Comprobar siempre la salida. No hay streaming durant
 Java 17, SDK 36, Build Tools 36, NDK 27.2.12479018, CMake 3.22.1 y ADB instalados.
 Ejecutar `scripts/build_android.ps1`: pruebas, lint, APK y validadores; deja
 `artifacts/Mi-Voz-Local-Android-arm64.apk`. Fuentes y pesos fijados por revisión y hashes.
-El script prepara también las cabeceras OpenCL fijadas. `-CpuOnly` genera una APK
-sin backend GPU en `artifacts/Mi-Voz-Local-Android-arm64-CPU.apk`.
+El script compila únicamente CPU. `-CpuOnly` se conserva como alias por compatibilidad.
 No quitar O3 ni los flags ARM; el binario es específico para procesadores compatibles.
 App `ar.com.mivozlocal.android`, mínimo API 31, target 36. La ruta PC sigue en espera.
 

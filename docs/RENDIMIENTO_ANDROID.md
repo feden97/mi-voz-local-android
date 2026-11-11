@@ -26,8 +26,8 @@ Optimizar la compilación no permite prometer un factor de mejora sin repetir la
 
 ## CPU, GPU e hilos
 
-Desde 0.3.2 se incluye **GPU OpenCL opcional** en Ajustes → Rendimiento, con CPU
-predeterminada. Ver [validación y procedimiento](VALIDACION_ANDROID_0_3_2.md).
+En 0.3.2 se probó GPU OpenCL, pero se retiró tras un bloqueo completo del teléfono.
+Desde 0.3.3 la app es **solo CPU**. Ver [análisis y validación](VALIDACION_ANDROID_0_3_3.md).
 La descripción siguiente corresponde a la actualización inicial de CPU.
 
 Esta actualización sigue usando **CPU**. No activa automáticamente la GPU Adreno ni

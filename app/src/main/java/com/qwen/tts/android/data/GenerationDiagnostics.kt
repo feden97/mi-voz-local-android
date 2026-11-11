@@ -12,6 +12,17 @@ import java.io.File
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -48,6 +59,37 @@ internal class GenerationDiagnostics(
     private val appVisibility = visibilityProvider
     private val serviceActive = foregroundServiceProvider
     private var droppedMemorySamples = 0
+    private val samplingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var samplingJob: Job? = null
+    @Volatile private var samplingPhase = "preparation"
+
+    /** Stable technical label only; JNI callbacks must not sample memory or write files. */
+    fun setPhase(phase: String) { samplingPhase = phase }
+
+    @Synchronized
+    fun startSampling() {
+        if (samplingJob != null || finished) return
+        samplingJob = samplingScope.launch {
+            var lastJournal = SystemClock.elapsedRealtime()
+            while (isActive) {
+                delay(10_000L)
+                runCatching { capture(samplingPhase) }
+                    .onFailure { warning("No se pudo tomar una muestra periódica del diagnóstico.") }
+                if (SystemClock.elapsedRealtime() - lastJournal >= 30_000L) {
+                    runCatching { checkpoint() }
+                        .onFailure { warning("No se pudo actualizar el registro periódico en disco.") }
+                    lastJournal = SystemClock.elapsedRealtime()
+                }
+            }
+        }
+    }
+
+    /** Join outside the report monitor so no sample or journal can race final output. */
+    suspend fun stopSampling() = withContext(NonCancellable) {
+        val job = synchronized(this@GenerationDiagnostics) { samplingJob.also { samplingJob = null } }
+        job?.cancelAndJoin()
+        samplingScope.cancel()
+    }
 
     init {
         val packageInfo = app.packageManager.getPackageInfo(app.packageName, 0)
@@ -73,7 +115,7 @@ internal class GenerationDiagnostics(
             .put("engine", JSONObject().put("name", "qwen3-tts.cpp")
                 .put("revision", "4562731dc612cb87b4cd1eedac275a17d1078773")
                 .put("ggmlRevision", "eced84c86f8b012c752c016f7fe789adea168e1e")
-                .put("localChanges", "cooperative CPU cancellation; decode-phase event; optional OpenCL dispatch; generic GPU capability mask"))
+                .put("localChanges", "cooperative CPU cancellation; decode-phase event; CPU-only build; independent diagnostic sampling and historical process exit records"))
             .put("parameters", JSONObject().put("backend", backend).put("requestedBackend", requestedBackend).put("cpuThreads", cpuThreads)
                 .put("cloningMode", cloningMode).put("languageId", languageId)
                 .put("inputCharacters", textCharacters).put("plannedChunks", plannedChunks)
@@ -88,17 +130,21 @@ internal class GenerationDiagnostics(
                     .put("reproducibility", "Resolved native seed is not exposed; no independent predictor seed or sub_temperature API")))
             .put("memorySamples", snapshots).put("stages", stages).put("chunks", chunks).put("warnings", warnings)
             .put("events", events)
+            .put("previousProcessExits", ProcessExitHistory.snapshot(app))
             .put("execution", JSONObject().put("backgroundServiceRequested", JSONObject.NULL)
                 .put("visibility", "App visibility is not inferred from screen interactive state"))
             .put("measurementNotes", JSONArray(listOf(
                 "PSS is process proportional resident memory, not total allocations or model file size.",
                 "Native heap allocated bytes exclude some memory mapped model weights and other allocations.",
                 "Battery temperature is not CPU/GPU/SoC temperature.",
+                "previousProcessExits are historical Android records, not a confirmed cause of the current job's failure. Records may be absent after a reboot; a signal alone does not establish a low-memory kill.",
                 "Memory and thermal peaks are observed samples; short peaks may be missed.",
                 "phaseMillis contains internal native timings; null means the pinned JNI does not expose that metric.",
                 "observedPhaseMillis measures wall time around the JNI call and its first decode event, including callback and JNI overhead. It does not isolate internal generation or decoder compute.",
                 "beforeDecodeEvent and afterDecodeEvent are null when no decode event was observed.",
                 "requestedBackend is the user selection; backend is the name reported by the engine after loading. A GPU backend may still execute some operations on CPU.",
+                "Periodic samples run on an independent IO coroutine every 10 seconds, including decoder time; captureDurationMillis records their observed collection cost.",
+                "The journal is written before preparation and periodically; incomplete chunks do not imply recoverable audio.",
             )))
     }
 
@@ -124,11 +170,11 @@ internal class GenerationDiagnostics(
             .put("elapsedMillis", SystemClock.elapsedRealtime() - started))
     }
 
-    /** At most one periodic sample per five seconds; force=true marks lifecycle boundaries. */
+    /** At most one periodic sample per ten seconds; force=true marks lifecycle boundaries. */
     @Synchronized
     fun capture(stage: String, force: Boolean = false) {
         val now = SystemClock.elapsedRealtime()
-        if (!force && lastCapture != Long.MIN_VALUE && now - lastCapture < 5_000) return
+        if (!force && lastCapture != Long.MIN_VALUE && now - lastCapture < 10_000) return
         lastCapture = now
         val sample = JSONObject().put("stage", DiagnosticFormatting.safeLabel(stage)).put("elapsedMillis", now - started)
         sample.put("appVisible", runCatching { appVisibility?.invoke() }.getOrNull() ?: JSONObject.NULL)
@@ -175,6 +221,7 @@ internal class GenerationDiagnostics(
             snapshots.remove(1) // Keep the initial sample and recent tail.
             report.put("droppedMemorySamples", ++droppedMemorySamples)
         }
+        sample.put("captureDurationMillis", SystemClock.elapsedRealtime() - now)
         snapshots.put(sample)
     }
 

@@ -9,6 +9,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--configuration", default="Debug")
     parser.add_argument("--expect-opencl", action="store_true", help="Require optimized Adreno OpenCL and the optional vendor dispatch")
+    parser.add_argument("--expect-cpu-only", action="store_true", help="Reject compiled GPU backend source files or capability defines")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     databases = sorted((root / "app/.cxx" / args.configuration).glob("**/compile_commands.json"),
@@ -16,6 +17,14 @@ def main():
     if not databases:
         raise SystemExit("No native compilation database found")
     rows = json.loads(databases[0].read_text(encoding="utf-8"))
+    if args.expect_cpu_only:
+        if args.expect_opencl:
+            raise SystemExit("Cannot require both CPU-only and OpenCL")
+        for row in rows:
+            source = row["file"].replace("\\", "/").lower()
+            command = row.get("command", " ".join(row.get("arguments", [])))
+            if any(name in source for name in ("ggml-opencl", "ggml-vulkan", "ggml-cuda", "mivoz_opencl")) or any(flag in command for flag in ("QWEN3_TTS_OPENCL_ENABLED", "QWEN3_TTS_VULKAN_ENABLED", "QWEN3_TTS_CUDA_ENABLED", "GGML_USE_OPENCL", "GGML_USE_VULKAN", "GGML_USE_CUDA")):
+                raise SystemExit(f"GPU compilation unit/definition in CPU-only build: {source}")
     if args.expect_opencl:
         loaders = [r for r in rows if r["file"].replace("\\", "/").endswith("/gguf_loader.cpp")]
         if not loaders or any("QWEN3_TTS_OPENCL_ENABLED" not in r.get("command", " ".join(r.get("arguments", []))) for r in loaders):

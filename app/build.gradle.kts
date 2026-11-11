@@ -12,7 +12,10 @@ val qwenVulkan = providers.gradleProperty("qwen.vulkan")
     .orElse(false)
 val qwenOpencl = providers.gradleProperty("qwen.opencl")
     .map { it.equals("true", ignoreCase = true) }
-    .orElse(true)
+    .orElse(false)
+check(!qwenOpencl.get() && !qwenVulkan.get()) {
+    "GPU disabled after a device-wide freeze on the S23 Ultra. Build this version with CPU only."
+}
 val qwenOpenclSdkDir = providers.gradleProperty("qwen.opencl.sdkDir")
     .orElse(layout.projectDirectory.dir("../build/opencl-sdk").asFile.absolutePath)
 val generatedOpenmpJniLibs = layout.buildDirectory.dir("generated/openmpJniLibs")
@@ -46,8 +49,8 @@ android {
         applicationId = "ar.com.mivozlocal.android"
         minSdk = 31
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.3.2-dev"
+        versionCode = 6
+        versionName = "0.3.3-dev"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

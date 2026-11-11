@@ -1,5 +1,10 @@
 # GPU opcional 0.3.2-dev
 
+**RETIRADA.** El usuario informó un bloqueo completo del S23 Ultra que requirió
+reinicio forzado. No repetir las pruebas GPU descritas en este informe histórico.
+Instalar [0.3.3 solo CPU](VALIDACION_ANDROID_0_3_3.md). Las comprobaciones estáticas
+que siguen no demostraban estabilidad del driver ni del teléfono.
+
 Destino: Samsung S23 Ultra, Android ARM64. No hay teléfono conectado por ADB;
 la síntesis GPU real y su rendimiento deben validarse en el equipo.
 

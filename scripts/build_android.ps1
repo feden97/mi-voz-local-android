@@ -18,26 +18,19 @@ Push-Location -LiteralPath $projectRoot
 try {
     python scripts/prepare_native.py
     if ($LASTEXITCODE -ne 0) { throw 'No se pudieron preparar las fuentes nativas.' }
-    if (!$CpuOnly) {
-        python scripts/prepare_opencl.py
-        if ($LASTEXITCODE -ne 0) { throw 'No se pudieron preparar las cabeceras OpenCL.' }
-        python scripts/generate_opencl_shim.py
-        if ($LASTEXITCODE -ne 0) { throw 'No se pudo generar el enlace opcional al driver OpenCL.' }
-    }
     $tasks = @(':app:assembleDebug')
     if (!$SkipChecks) { $tasks = @(':app:testDebugUnitTest', ':app:lintDebug') + $tasks }
-    $openclEnabled = if ($CpuOnly) { 'false' } else { 'true' }
-    & .\gradlew.bat --no-daemon "--max-workers=$Workers" "-Pqwen.opencl=$openclEnabled" @tasks
+    # Keep -CpuOnly accepted for existing callers; all builds are CPU-only now.
+    & .\gradlew.bat --no-daemon "--max-workers=$Workers" '-Pqwen.opencl=false' '-Pqwen.vulkan=false' @tasks
     if ($LASTEXITCODE -ne 0) { throw "La compilacion fallo ($LASTEXITCODE)." }
-    [string[]]$gpuCheckArgs = if ($CpuOnly) { @() } else { @('--expect-opencl') }
-    python scripts/verify_native_build.py @gpuCheckArgs
+    python scripts/verify_native_build.py --expect-cpu-only
     if ($LASTEXITCODE -ne 0) { throw 'El motor nativo no tiene las optimizaciones esperadas.' }
     $apk = Join-Path $projectRoot 'app\build\outputs\apk\debug\app-debug.apk'
-    python scripts/verify_apk.py $apk @gpuCheckArgs
+    python scripts/verify_apk.py $apk --expect-cpu-only
     if ($LASTEXITCODE -ne 0) { throw 'La APK no contiene todos los componentes esperados.' }
     $artifactDir = Join-Path $projectRoot 'artifacts'
     New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
-    $artifactName = if ($CpuOnly) { 'Mi-Voz-Local-Android-arm64-CPU.apk' } else { 'Mi-Voz-Local-Android-arm64.apk' }
+    $artifactName = 'Mi-Voz-Local-Android-arm64.apk'
     $artifact = Join-Path $artifactDir $artifactName
     Copy-Item -LiteralPath $apk -Destination $artifact -Force
     Write-Output "APK: $artifact"

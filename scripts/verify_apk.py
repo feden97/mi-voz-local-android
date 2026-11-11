@@ -51,6 +51,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("apk", nargs="?", type=Path, default=root / "app/build/outputs/apk/debug/app-debug.apk")
     parser.add_argument("--expect-opencl", action="store_true", help="Require the optional OpenCL backend and vendor dispatch library")
+    parser.add_argument("--expect-cpu-only", action="store_true", help="Reject packaged GPU backends and vendor GPU dependencies")
     args = parser.parse_args()
     apk = args.apk
     opencl_check = {}
@@ -62,6 +63,15 @@ def main() -> None:
         dex = b"".join(archive.read(n) for n in archive.namelist() if n.startswith("classes") and n.endswith(".dex"))
         abis = sorted({n.split("/")[1] for n in archive.namelist() if n.startswith("lib/") and n.endswith(".so")})
         assert abis == ["arm64-v8a"], f"Unexpected ABIs: {abis}"
+        if args.expect_cpu_only:
+            assert not args.expect_opencl, "Cannot require both CPU-only and OpenCL"
+            for name in archive.namelist():
+                if not name.startswith("lib/") or not name.endswith(".so"):
+                    continue
+                data = archive.read(name)
+                assert not any(part in name.lower() for part in ("opencl", "vulkan", "cuda")), f"GPU library in CPU-only APK: {name}"
+                assert not any(any(part in dependency.lower() for part in ("opencl", "vulkan", "cuda")) for dependency in elf_needed(data)), f"GPU dependency in CPU-only APK: {name}"
+                assert not {"ggml_backend_opencl_reg", "ggml_backend_vk_reg", "ggml_backend_cuda_reg"} & elf_exports(data), f"GPU backend exported by CPU-only APK: {name}"
         for name in methods:
             assert "Java_com_qwen_tts_studio_engine_QwenEngine_" + name in exported, f"Missing native export: {name}"
             assert name.encode() in dex, f"Missing Kotlin ICL declaration: {name}"

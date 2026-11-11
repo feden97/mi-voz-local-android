@@ -160,7 +160,6 @@ private val languageOptions = listOf(
 
 private val backendOptions = listOf(
     BackendOption("cpu", "CPU", QwenEngine.BACKEND_CPU),
-    BackendOption("gpu", "GPU experimental", QwenEngine.BACKEND_GPU),
 )
 
 private val defaultBackendOption = backendOptions.first { it.id == "cpu" }
@@ -262,6 +261,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var activePlayer: MediaPlayer? = null
 
     init {
+        // Discard the experimental GPU selection saved by 0.3.2 on upgrade.
+        preferences.edit().putString("backend-id", "cpu").apply()
         val threads = preferredCpuThreadCount()
         _uiState.update { it.copy(selectedCpuThreads = threads, cpuThreads = threads) }
         refreshModelState()
@@ -531,6 +532,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val diagnostic = requireNotNull(diagnostics)
                     diagnostic.noteExecution(background)
                     diagnostic.capture("before_preparation", true)
+                    runCatching { diagnostic.checkpoint() }.onFailure {
+                        diagnostic.warning("No se pudo guardar el registro inicial en disco.")
+                    }
+                    diagnostic.startSampling()
                     val sink = StreamingWavWriter(outputFile)
                     writer = sink
                     withEngineContext { native ->
@@ -573,7 +578,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     if (decoding && decodeStartedAt == null) decodeStartedAt = now
                                     val estimate = if (!decoding) GenerationEstimate.remaining(TextChunks.count(chunk), frames,
                                         now - firstAt, frames - firstFrame, rates, tails) else null
-                                    diagnostic.capture(if (decoding) "decode" else "generate")
+                                    diagnostic.setPhase(if (decoding) "decode" else "generate")
                                     _uiState.update { current -> current.copy(
                                         status = if (cancelRequested.get()) "Cancelación solicitada; esperando al motor" else "Generando audio",
                                         generationPhase = if (decoding) "Decodificando fragmento ${index + 1}/${chunks.size}" else "Generando fragmento ${index + 1}/${chunks.size}",
@@ -634,6 +639,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         else -> "failed"
                     }
                     diagnostics?.let { diagnostic ->
+                        diagnostic.stopSampling()
                         diagnostic.capture("after_native_release", true)
                         backgroundFailure?.let { diagnostic.warning(it); diagnostic.event("background_service_interrupted") }
                         diagnostic.finish(status, SystemClock.elapsedRealtime() - started, sampleCount, 24_000, problem?.javaClass?.simpleName)
@@ -2148,17 +2154,8 @@ private fun RuntimePanel(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (state.selectedBackendId == "gpu") {
-                Text("GPU es experimental: puede combinar trabajo en GPU y CPU. Si el teléfono no permite iniciarla, la carga falla; podés volver a CPU. Compará tiempo, memoria y el audio completo con CPU.", style = MaterialTheme.typography.bodySmall)
-                if (!QwenModel.variantById(state.selectedModelId).quantized) {
-                    Text("Con este modelo BF16, OpenCL convierte los pesos a FP16 en la GPU. Compará también la naturalidad con CPU.", style = MaterialTheme.typography.bodySmall)
-                }
-                if (state.activeBackendName?.startsWith("CPU", ignoreCase = true) == true) {
-                    Text("Se solicitó GPU, pero el motor informó CPU. Esta ejecución no confirma aceleración por GPU.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-            }
-            Text("Hilos de CPU (también se usan al elegir GPU)", style = MaterialTheme.typography.bodySmall)
+            Text("Esta versión usa solo CPU. GPU fue deshabilitada tras un bloqueo completo del teléfono.", style = MaterialTheme.typography.bodySmall)
+            Text("Hilos de CPU · 4 recomendados para 1.7B en este equipo", style = MaterialTheme.typography.bodySmall)
             Text("Más hilos no garantizan menor tiempo: compará la misma frase y controlá el calentamiento.", style = MaterialTheme.typography.bodySmall)
             listOf(2, 4, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
               Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
