@@ -172,6 +172,7 @@ def main() -> None:
     parser.add_argument("--expect-opencl", action="store_true", help="Require the optional OpenCL backend and vendor dispatch library")
     parser.add_argument("--expect-cpu-only", action="store_true", help="Reject packaged GPU backends and vendor GPU dependencies")
     parser.add_argument("--expect-local-asr", action="store_true", help="Require local ASR, shared CPU GGML, and the new sampling/timing ABI")
+    parser.add_argument("--expect-cpu-runtime", action="store_true", help="Require sleeping reusable CPU workers, operation profiler and fused decoder")
     args = parser.parse_args()
     apk = args.apk
     opencl_check = {}
@@ -181,6 +182,10 @@ def main() -> None:
     with zipfile.ZipFile(apk) as archive:
         assert archive.testzip() is None, "APK CRC verification failed"
         exported = elf_exports(archive.read("lib/arm64-v8a/libqwen3_tts_jni.so"))
+        if args.expect_cpu_runtime:
+            cpu_exports = elf_exports(archive.read("lib/arm64-v8a/libggml-cpu.so"))
+            assert {"mivoz_cpu_profile_begin", "mivoz_cpu_profile_phase", "mivoz_cpu_profile_read", "mivoz_cpu_profile_pool"} <= cpu_exports, "CPU operation profiler missing"
+            assert b"cpuOps" in archive.read("lib/arm64-v8a/libqwen3_tts_jni.so"), "CPU profile result missing"
         dex = b"".join(archive.read(n) for n in archive.namelist() if n.startswith("classes") and n.endswith(".dex"))
         abis = sorted({n.split("/")[1] for n in archive.namelist() if n.startswith("lib/") and n.endswith(".so")})
         assert abis == ["arm64-v8a"], f"Unexpected ABIs: {abis}"

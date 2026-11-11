@@ -9,9 +9,11 @@
   },
   {
     "path": "decoder/decoder_runtime.cpp",
-    "kind": "compute",
+    "kind": "compute_decoder",
     "upstream_sha256": "6279718aa699a00e81f2fa49b1ab7556089b3e6051ba8a552017180ba195f215",
-    "patched_sha256": "56aa9703a7e6767c95f12bcfbf4b34271c2492c8615f5d40652a97c6b7d47b43"
+    "patched_sha256": "924831805c5f4b70f9a6fef795ce98fbd3ecbf615c320109d3a9b478a24ec9b6",
+    "legacy_sha256": "56aa9703a7e6767c95f12bcfbf4b34271c2492c8615f5d40652a97c6b7d47b43",
+    "legacy_kind": "decoder_profile_upgrade"
   },
   {
     "path": "encoder/encoder_runtime.cpp",
@@ -81,5 +83,11 @@
     "upstream_sha256": "cda0babb53f9c8ff1faa7459b2c49019d15e5970dfe0c613d58e2659e919f524",
     "patched_sha256": "59441fb7c6782e08e2d80602bd87b47affe8e166cc6cdc59fcc6f341a57a0371",
     "scope": "ggml"
+  },
+  {
+    "path": "decoder/decoder_layers.cpp",
+    "kind": "decoder_snake",
+    "upstream_sha256": "624d804718c9d69d48862207e19ff4f0abacbb639a571235e633a8776520e8f1",
+    "patched_sha256": "1714ae96c8f44347b83d9f52aa15f0ee00c2318016210328c7d06307b63b164d"
   }
 ]

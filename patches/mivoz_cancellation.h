@@ -2,6 +2,7 @@
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "mivoz_cpu_profile.h"
 #include <atomic>
 
 // The Android app serializes its single native pipeline. This flag deliberately
@@ -24,5 +25,13 @@ inline enum ggml_status compute(ggml_backend_sched_t scheduler, ggml_cgraph * gr
     }
     const auto status = ggml_backend_sched_graph_compute(scheduler, graph);
     return should_abort(nullptr) ? GGML_STATUS_ABORTED : status;
+}
+
+inline enum ggml_status compute_decode(ggml_backend_sched_t scheduler, ggml_cgraph * graph) {
+    struct phase_scope {
+        phase_scope() { mivoz_cpu_profile_phase(1); }
+        ~phase_scope() { mivoz_cpu_profile_phase(0); }
+    } phase;
+    return compute(scheduler, graph);
 }
 } // namespace mivoz_cancellation

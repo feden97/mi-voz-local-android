@@ -62,6 +62,17 @@ def transform_cpu_jni(text: str) -> str:
 
 
 def transform(text: str, kind: str) -> str:
+    if kind == "decoder_snake":
+        text = '#include "mivoz_decoder_snake.h"\n' + text
+        anchor = '    if (alpha_exp && inv_beta_exp) {'
+        return replace_once(text, anchor, '''    if (mivoz_can_fuse_snake(x, alpha_exp, inv_beta_exp)) {
+        return ggml_map_custom3(ctx, x, alpha_exp, inv_beta_exp, mivoz_snake_f32, GGML_N_TASKS_MAX, nullptr);
+    }
+''' + anchor)
+    if kind == "compute_decoder":
+        return INCLUDE + text.replace("ggml_backend_sched_graph_compute(", "mivoz_cancellation::compute_decode(")
+    if kind == "decoder_profile_upgrade":
+        return text.replace("mivoz_cancellation::compute(", "mivoz_cancellation::compute_decode(")
     if kind == "cpu_backend":
         text = replace_once(text, "backend_preference preference = backend_preference::auto_select;", "backend_preference preference = backend_preference::cpu;")
         text = replace_once(text, "ggml_backend_t init_backend_by_type(enum ggml_backend_dev_type type) {", "ggml_backend_t init_backend_by_type(enum ggml_backend_dev_type type) {\n    if (type != GGML_BACKEND_DEVICE_TYPE_CPU) return nullptr; // GPU disabled.")
@@ -139,7 +150,7 @@ def apply_native_patches(root: Path = ROOT, check_only: bool = False) -> None:
             raise RuntimeError(f"Native patch output mismatch: {item['path']}")
         pending.append((path, changed))
     headers = [(native / name, (root / "patches" / name).read_text(encoding="utf-8"))
-               for name in ("mivoz_cancellation.h", "mivoz_native_metrics.h")]
+               for name in ("mivoz_cancellation.h", "mivoz_native_metrics.h", "mivoz_decoder_snake.h")]
     headers.append((root / "external/qwen3-tts.cpp/ggml/src/ggml-cpu/mivoz_bf16_dot.h",
                     (root / "patches/mivoz_bf16_dot.h").read_text(encoding="utf-8")))
     stale_headers = [(path, contents) for path, contents in headers
@@ -153,6 +164,8 @@ def apply_native_patches(root: Path = ROOT, check_only: bool = False) -> None:
         for path, contents in stale_headers:
             path.write_text(contents, encoding="utf-8", newline="\n")
     print("Native CPU/diagnostic/cancellation patches: verified" if check_only else "Native CPU/diagnostic/cancellation patches: ready")
+    from patch_cpu_runtime import apply
+    apply(root, check_only)
 
 
 if __name__ == "__main__":

@@ -33,17 +33,22 @@ jobs:
         run: |
           python scripts/prepare_native.py
           python scripts/prepare_asr.py
-      - name: Comprobar kernel BF16 ARM en emulación
+      - name: Comprobar kernel BF16 ARM en emulaciÃ³n
         run: |
           python -m pip install --target .tooling/cpu-kernel-test unicorn==2.1.4
           python scripts/verify_bf16_kernel.py
       - uses: gradle/actions/setup-gradle@v4
+      - name: Comprobar decodificador e hilos CPU
+        run: |
+          cmake -S scripts/native_cpu_tests -B .tooling/cpu-tests -DCMAKE_BUILD_TYPE=Release
+          cmake --build .tooling/cpu-tests --parallel 2
+          ctest --test-dir .tooling/cpu-tests --output-on-failure
       - name: Compilar, comprobar y analizar
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --max-workers=3 -Pqwen.opencl=false -Pqwen.vulkan=false :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
-          python scripts/verify_native_build.py --expect-cpu-only --expect-local-asr
-          python scripts/verify_apk.py app/build/outputs/apk/debug/app-debug.apk --expect-cpu-only --expect-local-asr
+          python scripts/verify_native_build.py --expect-cpu-only --expect-local-asr --expect-cpu-runtime
+          python scripts/verify_apk.py app/build/outputs/apk/debug/app-debug.apk --expect-cpu-only --expect-local-asr --expect-cpu-runtime
       - name: Guardar APK
         uses: actions/upload-artifact@v4
         with:

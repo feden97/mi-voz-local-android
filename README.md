@@ -6,6 +6,26 @@ DotProd y FP16. Desde 0.3.3 se usa **solo CPU**; GPU está deshabilitada tras un
 bloqueo completo del S23 Ultra durante una prueba. NPU sin activar.
 Pocket TTS queda fuera del proyecto.
 
+## Versión 0.3.5: decodificador y trabajadores CPU
+
+[**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.5/Mi-Voz-Local-Android-arm64.apk)
+
+Instalar encima, sin desinstalar. Mantiene certificado, voces, modelos e historial.
+
+- La activación Snake del decodificador combina cinco operaciones FP32 en una
+  pasada, conservando su orden aritmético y la función seno original. Se mantiene
+  la ruta anterior para formas/tipos no compatibles; no cambia los pesos.
+- Los backends CPU reutilizan sus trabajadores entre grafos. Duermen entre
+  cálculos y se destruyen al liberar el motor. Cambiar hilos reconstruye el pool.
+- JSON/TXT incluyen `cpuOps`: hasta doce grupos de operaciones por fase,
+  tiempos, llamadas y creaciones/reutilizaciones de pools. Los tiempos incluyen
+  sincronización y atribuyen fusiones al primer operador; no son tiempos de un
+  kernel aislado. No se registran nombres de tensores ni datos de voz.
+- Se conservan ICL, transcripción local, semillas y GPU deshabilitada.
+
+Las pruebas locales validan equivalencia y gestión de recursos. La aceleración
+final y la escucha de esta actualización necesitan medirse en el teléfono.
+
 ## Versión 0.3.4: ICL local y CPU BF16
 
 [**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.4/Mi-Voz-Local-Android-arm64.apk)

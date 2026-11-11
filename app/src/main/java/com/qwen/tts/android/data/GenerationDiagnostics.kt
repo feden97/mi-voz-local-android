@@ -118,7 +118,7 @@ internal class GenerationDiagnostics(
             .put("engine", JSONObject().put("name", "qwen3-tts.cpp")
                 .put("revision", "4562731dc612cb87b4cd1eedac275a17d1078773")
                 .put("ggmlRevision", "eced84c86f8b012c752c016f7fe789adea168e1e")
-                .put("localChanges", "CPU-only; ARM NEON BF16 dot product; cooperative cancellation; effective temperature/seed and native timing instrumentation"))
+                .put("localChanges", "CPU-only; BF16 NEON; fused FP32 decoder Snake; reusable sleeping CPU workers; operation profiling; effective temperature/seed"))
             .put("parameters", JSONObject().put("backend", backend).put("requestedBackend", requestedBackend).put("cpuThreads", cpuThreads)
                 .put("cloningMode", cloningMode).put("languageId", languageId)
                 .put("inputCharacters", textCharacters).put("plannedChunks", plannedChunks)

@@ -9,6 +9,9 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include "mivoz_cpu_profile.h"
 
 // The app serializes synthesis. Thread-local storage additionally keeps metrics
 // isolated from unrelated encoder calls. Only fixed names and numbers are stored.
@@ -17,6 +20,7 @@ inline thread_local int64_t effective_seed = -1;
 inline thread_local std::string transformer_json = "null";
 
 inline int64_t begin(int64_t requested_seed) {
+    mivoz_cpu_profile_begin();
     if (requested_seed < 0) {
         std::random_device random;
         requested_seed = int64_t(((uint64_t(random()) << 32) ^ uint64_t(random())) & uint64_t(INT64_MAX));
@@ -81,7 +85,23 @@ template<class Result> inline std::string result_json(const Result & result) {
         << "\"decodeGraphBuildMs\":" << result.t_decode_graph_build_ms << ','
         << "\"decodeGraphAllocMs\":" << result.t_decode_graph_alloc_ms << ','
         << "\"decodeGraphComputeMs\":" << result.t_decode_graph_compute_ms << ','
-        << "\"transformer\":" << transformer_json << '}';
+        << "\"transformer\":" << transformer_json;
+    const auto cpu = mivoz_cpu_profile_read();
+    out << ",\"cpuOps\":{\"poolsCreated\":" << cpu.pools_created
+        << ",\"poolsReused\":" << cpu.pools_reused
+        << ",\"poolCreateMs\":" << cpu.pool_create_us / 1000.0;
+    for (int phase = 0; phase < 2; ++phase) {
+        std::vector<int> ops;
+        for (int op = 0; op < GGML_OP_COUNT; ++op) if (cpu.calls[phase][op]) ops.push_back(op);
+        std::sort(ops.begin(), ops.end(), [&](int a, int b) { return cpu.us[phase][a] > cpu.us[phase][b]; });
+        if (ops.size() > 12) ops.resize(12);
+        for (const int op : ops) {
+            const std::string key = std::string(phase ? "decode_" : "generate_") + ggml_op_name((ggml_op) op);
+            out << ",\"" << key << "_ms\":" << cpu.us[phase][op] / 1000.0
+                << ",\"" << key << "_calls\":" << cpu.calls[phase][op];
+        }
+    }
+    out << "}}";
     return out.str();
 }
 } // namespace mivoz_native_metrics

@@ -12,6 +12,7 @@ def main():
     parser.add_argument("--expect-opencl", action="store_true", help="Require optimized Adreno OpenCL and the optional vendor dispatch")
     parser.add_argument("--expect-cpu-only", action="store_true", help="Reject compiled GPU backend source files or capability defines")
     parser.add_argument("--expect-local-asr", action="store_true", help="Require optimized local ASR, shared GGML, BF16 NEON source and timing instrumentation")
+    parser.add_argument("--expect-cpu-runtime", action="store_true", help="Require sleeping reusable CPU workers, operation profiler and fused decoder")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     databases = sorted((root / "app/.cxx" / args.configuration).glob("**/compile_commands.json"),
@@ -33,6 +34,11 @@ def main():
         loaders = [r for r in rows if r["file"].replace("\\", "/").endswith("/gguf_loader.cpp")]
         if not loaders or any("QWEN3_TTS_OPENCL_ENABLED" not in r.get("command", " ".join(r.get("arguments", []))) for r in loaders):
             raise SystemExit("GPU capability mask is missing the OpenCL compile definition in a GGUF loader")
+    if args.expect_cpu_runtime:
+        from patch_cpu_runtime import apply
+        apply(root, check_only=True)
+        from patch_native import apply_native_patches
+        apply_native_patches(root, check_only=True)
     verified = {}
     filenames = ["ggml-cpu.c", "ggml-quants.c", "transformer_runtime_code_pred.cpp", "decoder_runtime.cpp"]
     if args.expect_local_asr:
