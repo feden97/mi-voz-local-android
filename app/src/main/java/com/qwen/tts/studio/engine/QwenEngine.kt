@@ -86,6 +86,12 @@ class QwenEngine : AutoCloseable {
 
     fun getCpuThreads(): Int = nativeGetCpuThreads()
 
+    /** Concurrent, non-blocking: only sets a process-lifetime atomic cancellation flag. */
+    fun requestCancel() = nativeRequestCancel()
+
+    /** Call once before starting an operation, never after preparation has started. */
+    fun resetCancellation() = nativeResetCancellation()
+
     fun setProgressCallback(callback: ProgressCallback?): Boolean =
         nativeSetProgressCallback(nativePtr, callback)
 
@@ -116,6 +122,8 @@ class QwenEngine : AutoCloseable {
     private external fun nativeGetCompiledBackendMask(): Int
     private external fun nativeSetCpuThreads(nThreads: Int): Boolean
     private external fun nativeGetCpuThreads(): Int
+    private external fun nativeRequestCancel()
+    private external fun nativeResetCancellation()
     private external fun nativeSetProgressCallback(ptr: Long, callback: ProgressCallback?): Boolean
     private external fun nativeGetActiveBackendName(): String?
     private external fun nativeLoadModels(ptr: Long, modelDir: String, modelName: String?): Boolean

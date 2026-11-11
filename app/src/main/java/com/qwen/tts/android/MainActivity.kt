@@ -104,6 +104,7 @@ import com.qwen.tts.android.data.ModelFile
 import com.qwen.tts.android.data.ModelVariant
 import com.qwen.tts.android.data.QwenModel
 import com.qwen.tts.android.data.VoicePromptFiles
+import com.qwen.tts.android.data.GenerationEstimate
 import com.qwen.tts.android.data.db.GenerationEntity
 import com.qwen.tts.android.data.db.QwenDatabase
 import com.qwen.tts.android.data.db.VoiceProfileEntity
@@ -190,6 +191,13 @@ data class QwenTtsUiState(
     val snackbarMessage: String? = null,
     val estimatedSynthesisMillis: Long? = null,
     val estimateSampleCount: Int = 0,
+    val canCancel: Boolean = false,
+    val cancelling: Boolean = false,
+    val etaLowMillis: Long? = null,
+    val etaHighMillis: Long? = null,
+    val etaIncludesDecode: Boolean = false,
+    val etaObservedAtMillis: Long = 0,
+    val generationPhase: String = "",
     val supportsCloning: Boolean? = null,
     val speakerEmbeddingDim: Int = 0,
 )
@@ -218,7 +226,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val uiState = _uiState.asStateFlow()
 
-    private var engine: QwenEngine? = null
+    @Volatile private var engine: QwenEngine? = null
+    private val cancelRequested = AtomicBoolean(false)
     private val nativeLock = Any()
     private val cleared = AtomicBoolean(false)
     private var generatedAudio: FloatArray? = null
@@ -406,6 +415,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // History predates model selection and has no model ID. Do not mix its timings across models.
             startBusy(status = "Generando voz", resetSynthesis = true)
 
+            var synthesisStarted = 0L
+            var firstFrameAt = 0L
+            var firstFrame = 0
+            var lastFrameAt = 0L
+            var lastFrame = 0
+            var calibrationKey = ""
+            var speechRates = emptyList<Double>()
+            var tails = emptyList<Long>()
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                   withEngineContext { native ->
@@ -413,19 +430,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val iclPrompt = selectedVoice?.takeIf { transcript.isNotBlank() }?.let {
                         prepareIclPrompt(native, variant, File(it.referenceWavPath), transcript)
                     }
+                    throwIfCancelRequested(native)
+                    _uiState.update { it.copy(generationPhase = "Cargando modelo") }
                     ensureEngineLoaded(variant)
+                    throwIfCancelRequested(native)
+                    val mode = if (iclPrompt != null) "icl" else if (selectedVoice != null) "timbre" else "default"
+                    val backend = native.getActiveBackendName().orEmpty()
+                    calibrationKey = "eta-v2-optimized-0_2-${variant.id}-$backend-${selectedCpuThreadCount()}-$mode-${_uiState.value.selectedLanguageId}"
+                    speechRates = preferences.getString("$calibrationKey-rates", "").orEmpty().split(',').mapNotNull { it.toDoubleOrNull() }
+                    tails = preferences.getString("$calibrationKey-tails", "").orEmpty().split(',').mapNotNull { it.toLongOrNull() }
                     val embeddingPath = if (iclPrompt == null) selectedVoice?.let { speakerEmbeddingFor(native, it, variant) } else null
                     native.setProgressCallback { frames, maxTokens ->
+                        val now = SystemClock.elapsedRealtime()
+                        if (firstFrameAt == 0L && frames > 0) { firstFrameAt = now; firstFrame = frames }
+                        if (frames > 0) { lastFrameAt = now; lastFrame = frames }
+                        val decoding = maxTokens == -1
+                        val estimate = if (!decoding) GenerationEstimate.remaining(text.length, frames, now - firstFrameAt,
+                            frames - firstFrame, speechRates, tails) else null
+                        val low = if (decoding) tails.minOrNull()?.times(0.75)?.toLong() else estimate?.lowMillis
+                        val high = if (decoding) tails.maxOrNull()?.times(1.5)?.toLong() else estimate?.highMillis
                         _uiState.update {
                             it.copy(
                                 loaded = true,
-                                status = "Generando audio",
+                                status = if (cancelRequested.get()) "Cancelación solicitada; esperando al motor" else "Generando audio",
+                                generationPhase = if (decoding) "Decodificando audio" else "Generando códigos de voz",
+                                etaLowMillis = low,
+                                etaHighMillis = high,
+                                etaIncludesDecode = tails.isNotEmpty(),
+                                etaObservedAtMillis = it.operationElapsedMillis,
                                 synthesisFrames = frames,
-                                maxAudioTokens = maxTokens,
+                                maxAudioTokens = if (maxTokens >= 0) maxTokens else it.maxAudioTokens,
                             )
                         }
                     }
                     try {
+                        throwIfCancelRequested(native)
+                        synthesisStarted = SystemClock.elapsedRealtime()
+                        _uiState.update { it.copy(generationPhase = "Generando códigos de voz") }
                         val params = QwenEngine.NativeParams(languageId = _uiState.value.selectedLanguageId)
                         if (iclPrompt != null) {
                             native.synthesizeWithIclPrompt(text, iclPrompt.absolutePath, params)
@@ -445,6 +486,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             result.fold(
                 onSuccess = { nativeResult ->
                     stopBusyTicker()
+                    if (cancelRequested.get()) {
+                        finishCancelled()
+                        return@fold
+                    }
+                    _uiState.update { it.copy(canCancel = false, cancelling = false, generationPhase = "Guardando audio") }
                     if (!nativeResult.success || nativeResult.audio == null) {
                         _uiState.update {
                             it.copy(
@@ -457,6 +503,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         return@fold
                     }
 
+                    if (calibrationKey.isNotBlank() && nativeResult.sampleRate > 0 && nativeResult.audio.isNotEmpty()) {
+                        val duration = nativeResult.audio.size.toDouble() / nativeResult.sampleRate
+                        val rate = text.length / duration
+                        val tail = if (lastFrameAt > synthesisStarted && lastFrame > 0)
+                            (SystemClock.elapsedRealtime() - lastFrameAt).coerceAtLeast(0) else null
+                        val editor = preferences.edit().putString("$calibrationKey-rates", (speechRates + rate).takeLast(5).joinToString(","))
+                        if (tail != null) editor.putString("$calibrationKey-tails", (tails + tail).takeLast(5).joinToString(","))
+                        editor.apply()
+                    }
                     generatedAudio = nativeResult.audio
                     val sampleRate = nativeResult.sampleRate.takeIf { it > 0 } ?: 24_000
                     val voiceName = selectedVoice?.name ?: "Voz predeterminada"
@@ -479,6 +534,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             decodeFrames = nativeResult.decodeFrames,
                             decodeSamples = nativeResult.decodeSamples,
                             decodeGraphComputeMillis = nativeResult.decodeGraphComputeMs,
+                            canCancel = false,
+                            cancelling = false,
+                            generationPhase = "",
+                            etaLowMillis = null,
+                            etaHighMillis = null,
                             estimatedSynthesisMillis = null,
                             estimateSampleCount = 0,
                             error = saveError?.let { "No se pudo guardar en el historial: ${it.message}" },
@@ -488,9 +548,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 onFailure = { throwable ->
                     stopBusyTicker()
+                    if (cancelRequested.get()) {
+                        finishCancelled()
+                        return@fold
+                    }
+                    if (throwable is CancellationException) throw throwable
                     _uiState.update {
                         it.copy(
                             busy = false,
+                            canCancel = false,
+                            cancelling = false,
                             status = "Falló la generación",
                             error = throwable.message ?: "Falló la generación",
                         )
@@ -498,6 +565,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
             )
         }
+    }
+
+    fun cancelSynthesis() {
+        if (!_uiState.value.canCancel || !_uiState.value.busy || !cancelRequested.compareAndSet(false, true)) return
+        _uiState.update { it.copy(cancelling = true, status = "Cancelación solicitada; esperando al motor") }
+        // Global atomic signal: never wait for the monitor held by synchronous inference.
+        engine?.requestCancel()
+    }
+
+    private fun throwIfCancelRequested(native: QwenEngine) {
+        if (cancelRequested.get()) {
+            native.requestCancel()
+            throw CancellationException("Generación cancelada")
+        }
+    }
+
+    private fun finishCancelled() {
+        stopBusyTicker()
+        generatedAudio = null
+        _uiState.update { it.copy(busy = false, canCancel = false, cancelling = false,
+            status = "Generación cancelada; no se guardó audio incompleto", error = null,
+            sampleCount = 0, etaLowMillis = null, etaHighMillis = null, generationPhase = "") }
     }
 
     fun startVoiceRecording() {
@@ -753,7 +842,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         synchronized(nativeLock) {
             check(!cleared.get()) { "La sesión del motor terminó." }
             val native = engine ?: QwenEngine().also { engine = it }
-            block(native)
+            try {
+                native.resetCancellation()
+                throwIfCancelRequested(native)
+                block(native)
+            } finally {
+                if (cancelRequested.get()) {
+                    // A cancelled GGML graph can leave KV/scheduler state incomplete.
+                    // Free only after native execution has returned and while holding the monitor.
+                    native.close()
+                    engine = null
+                    _uiState.update { it.copy(loaded = false, activeBackendName = null) }
+                }
+            }
         }
 
     private inline fun <T> withEngine(variant: ModelVariant, block: (QwenEngine) -> T): T =
@@ -781,6 +882,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         transcript: String,
         encoderReady: Boolean = false,
     ): File {
+        throwIfCancelRequested(native)
+        _uiState.update { it.copy(generationPhase = "Preparando la voz de referencia") }
         val prompt = VoicePromptFiles.promptFile(reference, variant.id, transcript)
         if (prompt.isFile && prompt.length() > 0L) return prompt
         if (!encoderReady) loadReferenceEncoder(native, variant)
@@ -868,10 +971,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         synthesisEstimate: GenerationTimeEstimate? = null,
     ) {
         operationTickerJob?.cancel()
+        cancelRequested.set(false)
         val start = SystemClock.elapsedRealtime()
         _uiState.update {
             it.copy(
                 busy = true,
+                canCancel = resetSynthesis,
+                cancelling = false,
+                etaLowMillis = null,
+                etaHighMillis = null,
+                generationPhase = if (resetSynthesis) "Preparando generación" else "",
                 downloading = downloading,
                 error = null,
                 status = status,
@@ -1073,6 +1182,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         cleared.set(true)
+        cancelRequested.set(true)
+        engine?.requestCancel()
         recorder.cancel()
         stopAudio()
         stopBusyTicker()
@@ -1267,8 +1378,8 @@ private fun StudioScreen(viewModel: MainViewModel) {
                 .fillMaxWidth(),
         ) {
             Button(
-                onClick = viewModel::synthesize,
-                enabled = state.modelReady && state.text.isNotBlank() && !state.busy,
+                onClick = { if (state.canCancel) viewModel.cancelSynthesis() else viewModel.synthesize() },
+                enabled = if (state.canCancel) !state.cancelling else state.modelReady && state.text.isNotBlank() && !state.busy,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(16.dp)
@@ -1276,7 +1387,7 @@ private fun StudioScreen(viewModel: MainViewModel) {
             ) {
                 Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(if (state.busy && !state.downloading) "Generando..." else "Generar")
+                Text(when { state.cancelling -> "Cancelando…"; state.canCancel -> "Cancelar generación"; state.busy && !state.downloading -> "Trabajando…"; else -> "Generar" })
             }
         }
     }
@@ -1846,12 +1957,14 @@ private fun RuntimePanel(
                 Text("Rendimiento", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             }
             Text(
-                "Motor CPU",
+                "Motor efectivo: ${state.activeBackendName ?: "CPU (se confirmará al cargar)"}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(4, 6).forEach { threads ->
+            Text("Más hilos no garantizan menor tiempo: compará la misma frase y controlá el calentamiento.", style = MaterialTheme.typography.bodySmall)
+            listOf(2, 4, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                options.forEach { threads ->
                     FilterChip(
                         selected = state.selectedCpuThreads == threads,
                         onClick = { onCpuThreadsChange(threads) },
@@ -1859,6 +1972,7 @@ private fun RuntimePanel(
                         label = { Text("$threads hilos") },
                     )
                 }
+              }
             }
         }
     }
@@ -1874,7 +1988,7 @@ private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () ->
             } else {
                 if (state.sampleCount > 0 && state.sampleRate > 0) {
                     Text(
-                        "Audio ${formatSeconds(state.sampleCount.toDouble() / state.sampleRate.toDouble())} · generado en ${formatDuration(state.synthesisMillis)}",
+                        "Audio ${formatSeconds(state.sampleCount.toDouble() / state.sampleRate.toDouble())} · generado en ${formatDuration(state.synthesisMillis)} · RTF %.1f".format(Locale.US, state.synthesisMillis.toDouble() / 1000 / (state.sampleCount.toDouble() / state.sampleRate)),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1902,29 +2016,29 @@ private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () ->
 @Composable
 private fun GenerationStats(state: QwenTtsUiState) {
     val generatedAudioSeconds = state.synthesisFrames * 0.08
-    val remainingMillis = state.estimatedSynthesisMillis
-        ?.minus(state.operationElapsedMillis)
-        ?.coerceAtLeast(0L)
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            "Tiempo ${formatDuration(state.operationElapsedMillis)}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(if (state.cancelling) "Cancelación solicitada; el motor debe detenerse antes de liberar la memoria." else state.generationPhase.ifBlank { state.status }, style = MaterialTheme.typography.bodySmall)
+        Text("Tiempo transcurrido: ${formatDuration(state.operationElapsedMillis)}", style = MaterialTheme.typography.bodySmall)
+        Text("${state.activeBackendName ?: "CPU"} · ${state.cpuThreads} hilos", style = MaterialTheme.typography.bodySmall)
         if (state.synthesisFrames > 0) {
-            Text(
-                "Audio generado hasta ahora: ~${formatSeconds(generatedAudioSeconds)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Text("Audio estimado generado: ~${formatSeconds(generatedAudioSeconds)} (todavía sin decodificar)", style = MaterialTheme.typography.bodySmall)
         }
-        if (remainingMillis != null && state.estimateSampleCount >= 3) {
-            Text(
-                "Tiempo restante estimado: ${formatDuration(remainingMillis)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        if (!state.cancelling) {
+            val age = (state.operationElapsedMillis - state.etaObservedAtMillis).coerceAtLeast(0)
+            val low = state.etaLowMillis?.minus(age)?.coerceAtLeast(0)
+            val high = state.etaHighMillis?.minus(age)?.coerceAtLeast(0)
+            if (high == 0L) {
+                Text("La operación está superando el rango estimado; esperando nuevo progreso.", style = MaterialTheme.typography.bodySmall)
+            } else if (low != null && high != null) {
+                val label = if (state.etaIncludesDecode) "Finalización aproximada" else "Generación aproximada"
+                val clock = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
+                val now = System.currentTimeMillis()
+                Text("$label: entre ${clock.format(java.util.Date(now + low))} y ${clock.format(java.util.Date(now + high))}", style = MaterialTheme.typography.bodySmall)
+                Text("Tiempo restante estimado: ${formatDuration(low)}–${formatDuration(high)}. Puede variar por pausas y temperatura.", style = MaterialTheme.typography.bodySmall)
+                if (!state.etaIncludesDecode) Text("Primera medición: rango amplio; la decodificación final aún no tiene una estimación.", style = MaterialTheme.typography.bodySmall)
+            } else {
+                Text(if (state.generationPhase == "Decodificando audio") "Decodificando audio: todavía no hay datos para estimar esta fase." else "Calculando estimación con el progreso real… La carga y preparación pueden tardar.", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }

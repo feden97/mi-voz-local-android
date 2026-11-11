@@ -11,6 +11,7 @@ import stat
 import tempfile
 import urllib.request
 import zipfile
+from patch_native import apply_native_patches
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
@@ -63,6 +64,8 @@ def main() -> None:
             print(f"{repository}@{revision} -> {destination.relative_to(ROOT)}")
         else:
             fetch(repository, revision, destination)
+    if not args.dry_run:
+        apply_native_patches()
 
 
 if __name__ == "__main__":

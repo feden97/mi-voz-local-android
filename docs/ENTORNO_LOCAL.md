@@ -47,8 +47,8 @@ Las herramientas y cachés son locales, no deben subirse a GitHub.
 ## Alcance de las comprobaciones
 
 Java y ADB se ejecutaron correctamente después de instalar. La APK con ICL compiló
-correctamente: 12 pruebas sin fallos, lint, firma v2 y alineación ZIP/ELF de 16 KiB
-verificados. Ver [VALIDACION_ANDROID.md](VALIDACION_ANDROID.md).
+correctamente; la actualización 0.2.0 pasó 16 pruebas, lint, verificación de firma
+v2 y alineación ZIP. Ver [VALIDACION_ANDROID_0_2.md](VALIDACION_ANDROID_0_2.md).
 La síntesis y el uso real en el Samsung siguen pendientes de una prueba en el equipo.
 
 La generación en PC queda en espera por prioridad de Android. Su punto de partida

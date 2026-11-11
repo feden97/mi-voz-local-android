@@ -1,5 +1,8 @@
 # Validación del APK Android
 
+Este documento conserva la validación histórica de 0.1.0. La actualización actual
+se documenta en [VALIDACION_ANDROID_0_2.md](VALIDACION_ANDROID_0_2.md).
+
 Fecha: 10 de noviembre de 2026. Se verificó la compilación y el paquete;
 **la generación de voz en el S23 Ultra sigue sin probarse**.
 

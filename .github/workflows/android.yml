@@ -32,6 +32,7 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+          python scripts/verify_native_build.py
       - name: Guardar APK
         uses: actions/upload-artifact@v4
         with:

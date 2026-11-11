@@ -6,6 +6,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Inference kernels must be optimized even in a debuggable APK. The first release
+# inherited CMake Debug's unoptimized defaults, including the predictor and GGML.
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    add_compile_options(-O3)
+    add_compile_definitions(NDEBUG)
+endif()
+
+# This app targets the S23 Ultra (Snapdragon 8 Gen 2). Do not infer ARM features
+# from the Windows/Linux build host. All its CPU cores support FP16 and dotprod.
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "" FORCE)
+
 set(QWEN3_TTS_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../external/qwen3-tts.cpp")
 set(GGML_DIR "${QWEN3_TTS_ROOT}/ggml")
 

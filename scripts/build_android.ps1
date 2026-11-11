@@ -22,6 +22,8 @@ try {
     if (!$SkipChecks) { $tasks = @(':app:testDebugUnitTest', ':app:lintDebug') + $tasks }
     & .\gradlew.bat --no-daemon "--max-workers=$Workers" @tasks
     if ($LASTEXITCODE -ne 0) { throw "La compilacion fallo ($LASTEXITCODE)." }
+    python scripts/verify_native_build.py
+    if ($LASTEXITCODE -ne 0) { throw 'El motor nativo no tiene las optimizaciones esperadas.' }
     $apk = Join-Path $projectRoot 'app\build\outputs\apk\debug\app-debug.apk'
     python scripts/verify_apk.py $apk
     if ($LASTEXITCODE -ne 0) { throw 'La APK no contiene todos los componentes esperados.' }

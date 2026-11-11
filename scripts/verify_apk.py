@@ -28,7 +28,8 @@ def elf_exports(data: bytes) -> set[str]:
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     apk = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "app/build/outputs/apk/debug/app-debug.apk"
-    methods = ("nativeLoadIclPromptEncoder", "nativeExtractIclPrompt", "nativeSynthesizeWithIclPrompt")
+    methods = ("nativeLoadIclPromptEncoder", "nativeExtractIclPrompt", "nativeSynthesizeWithIclPrompt",
+               "nativeRequestCancel", "nativeResetCancellation")
     with zipfile.ZipFile(apk) as archive:
         assert archive.testzip() is None, "APK CRC verification failed"
         exported = elf_exports(archive.read("lib/arm64-v8a/libqwen3_tts_jni.so"))
@@ -38,7 +39,7 @@ def main() -> None:
         for name in methods:
             assert "Java_com_qwen_tts_studio_engine_QwenEngine_" + name in exported, f"Missing native export: {name}"
             assert name.encode() in dex, f"Missing Kotlin ICL declaration: {name}"
-        for name in (b"VoicePromptFiles", b"reference.txt", b"1_7b_bf16", b"0_6b_bf16"):
+        for name in (b"VoicePromptFiles", b"reference.txt", b"1_7b_bf16", b"0_6b_bf16", b"GenerationEstimate"):
             assert name in dex, f"Missing ICL/catalog code: {name}"
     print(json.dumps({"apk": str(apk), "bytes": apk.stat().st_size,
                       "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),

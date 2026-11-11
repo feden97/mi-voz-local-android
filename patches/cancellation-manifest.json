@@ -1,0 +1,50 @@
+[
+  {
+    "path": "decoder/decoder_runtime.cpp",
+    "kind": "compute",
+    "upstream_sha256": "6279718aa699a00e81f2fa49b1ab7556089b3e6051ba8a552017180ba195f215",
+    "patched_sha256": "56aa9703a7e6767c95f12bcfbf4b34271c2492c8615f5d40652a97c6b7d47b43"
+  },
+  {
+    "path": "encoder/encoder_runtime.cpp",
+    "kind": "compute",
+    "upstream_sha256": "372a974870b44210751ce433258e7a70591b5bd609c6cbe096a3a50173b08565",
+    "patched_sha256": "ca49988e9e021c10e68c1f2af556240dcbb5171b302411fcb91cc522834e3b15"
+  },
+  {
+    "path": "qwen3_tts_jni.cpp",
+    "kind": "jni",
+    "upstream_sha256": "fd00211260057f4dbaab08b786935ce2e1880067163f68a4404c2acd8bcca412",
+    "patched_sha256": "5e9fe4d932b8564658939b2dc175918bf8f49eb8dbc0f6ff2aa29af8e35c0f38"
+  },
+  {
+    "path": "speech_tokenizer_encoder.cpp",
+    "kind": "compute",
+    "upstream_sha256": "d436d3877ea4d27fa8ea5bd5f769698101425f491df59535c7558c7b0a9b073e",
+    "patched_sha256": "8c40d2a1ef92a54c2b70979f8c333b59961343956979c3028739761733270e29"
+  },
+  {
+    "path": "transformer/transformer_embeddings.cpp",
+    "kind": "compute",
+    "upstream_sha256": "9f38723ca12dc0b40836e1dc28b334ada6c3934671d71b339827b2c27fb31305",
+    "patched_sha256": "5d005e96552be1c18abbf1c31b53a2f742e78f0a00e5dcc8c5eec3bec63840e9"
+  },
+  {
+    "path": "transformer/transformer_runtime.cpp",
+    "kind": "compute",
+    "upstream_sha256": "ba680b8625732f73564eeb7298e4642ebb25067e796a6624dda5f05cd18f60f7",
+    "patched_sha256": "288421b7ea884b4a99cdcfaf24634771e41d6bfc6ee5d014aa009e1ce60738a2"
+  },
+  {
+    "path": "transformer/transformer_runtime_code_pred.cpp",
+    "kind": "compute",
+    "upstream_sha256": "a6d2362b458527593d042da313693405ddcc2c9b1c8027faa7a8552752e87ea3",
+    "patched_sha256": "01d94980a158ece502e558616209e41b81df44a50ce5f8e9c80c06c849f5fe00"
+  },
+  {
+    "path": "pipeline/pipeline_synthesize.cpp",
+    "kind": "decode_phase",
+    "upstream_sha256": "c166e96887613b35877d1983d0d23be8910e4dd4b6d2e8ad72fc5143b21742f2",
+    "patched_sha256": "7c6af01762db6d18c9acd85084d16e841d4437b9e097be6a3addfccaa42f0145"
+  }
+]
