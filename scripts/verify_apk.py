@@ -39,7 +39,8 @@ def main() -> None:
         for name in methods:
             assert "Java_com_qwen_tts_studio_engine_QwenEngine_" + name in exported, f"Missing native export: {name}"
             assert name.encode() in dex, f"Missing Kotlin ICL declaration: {name}"
-        for name in (b"VoicePromptFiles", b"reference.txt", b"1_7b_bf16", b"0_6b_bf16", b"GenerationEstimate"):
+        for name in (b"VoicePromptFiles", b"reference.txt", b"1_7b_bf16", b"0_6b_bf16", b"GenerationEstimate",
+                     b"GenerationDiagnostics", b"TextChunks", b"StreamingWavWriter", b"GenerationForegroundService", b"GenerationRuntime"):
             assert name in dex, f"Missing ICL/catalog code: {name}"
     print(json.dumps({"apk": str(apk), "bytes": apk.stat().st_size,
                       "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),

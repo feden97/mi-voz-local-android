@@ -24,4 +24,15 @@ data class GenerationEntity(
     val sampleCount: Int,
     val synthesisMillis: Long,
     val createdAt: Long = System.currentTimeMillis(),
+    // Nullable snapshots: older results were not instrumented and must remain unknown.
+    val modelId: String? = null,
+    val modelName: String? = null,
+    val backend: String? = null,
+    val cpuThreads: Int? = null,
+    val cloningMode: String? = null,
+    val reportPath: String? = null,
+    val totalMillis: Long? = null,
+    val chunkCount: Int? = null,
+    val status: String? = null,
+    val completedChunks: Int? = null,
 )
