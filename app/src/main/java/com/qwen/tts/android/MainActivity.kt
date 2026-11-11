@@ -117,6 +117,8 @@ import com.qwen.tts.android.data.StreamingWavWriter
 import com.qwen.tts.android.data.GenerationDiagnostics
 import com.qwen.tts.android.data.GenerationSampling
 import com.qwen.tts.android.data.ModelFileVerifier
+import com.qwen.tts.android.data.ModelStorage
+import com.qwen.tts.android.data.PrivateFiles
 import com.qwen.tts.android.data.ReferenceTranscriber
 import com.qwen.tts.android.data.db.GenerationEntity
 import com.qwen.tts.android.data.db.QwenDatabase
@@ -167,6 +169,12 @@ private val backendOptions = listOf(
 )
 
 private val defaultBackendOption = backendOptions.first { it.id == "cpu" }
+
+sealed interface PendingDeletion {
+    data class Voice(val voice: VoiceProfileEntity) : PendingDeletion
+    data class Generation(val generation: GenerationEntity) : PendingDeletion
+    data class Model(val modelId: String) : PendingDeletion
+}
 
 data class QwenTtsUiState(
     val text: String = "Hola, esta es una prueba de mi voz generada de forma local en el teléfono.",
@@ -238,6 +246,8 @@ data class QwenTtsUiState(
     val transcriptionError: String? = null,
     val asrModelReady: Boolean = false,
     val downloadedModelIds: Set<String> = emptySet(),
+    val storedModelIds: Set<String> = emptySet(),
+    val pendingDeletion: PendingDeletion? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -248,6 +258,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val recorder = VoiceRecorder()
     private val preferences = application.getSharedPreferences("studio-settings", Application.MODE_PRIVATE)
     private val modelVerifier = ModelFileVerifier(File(application.filesDir, "model-integrity"))
+    private val modelStorage = ModelStorage(modelDir, QwenModel.variants)
     private val transcriber = ReferenceTranscriber(application)
     private val savedVariant = QwenModel.variantById(preferences.getString("model-id", null).orEmpty())
 
@@ -970,14 +981,74 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteVoice(voice: VoiceProfileEntity) {
+        if (!_uiState.value.busy && !recorderState.value.isRecording)
+            _uiState.update { it.copy(pendingDeletion = PendingDeletion.Voice(voice)) }
+    }
+
+    fun uninstallModel(modelId: String) {
+        if (!_uiState.value.busy && !recorderState.value.isRecording && QwenModel.variants.any { it.id == modelId })
+            _uiState.update { it.copy(pendingDeletion = PendingDeletion.Model(modelId)) }
+    }
+
+    fun dismissDeletion() {
+        if (!_uiState.value.busy) _uiState.update { it.copy(pendingDeletion = null) }
+    }
+
+    fun confirmDeletion() {
         if (_uiState.value.busy || recorderState.value.isRecording) return
-        viewModelScope.launch(Dispatchers.IO) {
-            dao.deleteVoice(voice)
-            runCatching { File(voice.referenceWavPath).parentFile?.deleteRecursively() }
-            if (_uiState.value.selectedVoiceId == voice.voiceId) {
-                preferences.edit().remove("voice-id").apply()
-                _uiState.update { it.copy(selectedVoiceId = null) }
+        val pending = _uiState.value.pendingDeletion ?: return
+        _uiState.update { it.copy(pendingDeletion = null) }
+        stopAudio()
+        startBusy("Eliminando archivos")
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    when (pending) {
+                        is PendingDeletion.Model -> {
+                            val variant = QwenModel.variants.first { it.id == pending.modelId }
+                            synchronized(nativeLock) { engine?.close(); engine = null }
+                            _uiState.update { it.copy(loaded = false, activeBackendName = null, supportsCloning = null, speakerEmbeddingDim = 0) }
+                            modelStorage.remove(variant, modelVerifier::invalidate)
+                        }
+                        is PendingDeletion.Voice -> {
+                            val voice = pending.voice
+                            val reference = PrivateFiles.child(voiceDir, File(voice.referenceWavPath))
+                            val folder = requireNotNull(reference.parentFile)
+                            PrivateFiles.deleteTree(voiceDir, folder)
+                            dao.deleteVoice(voice)
+                            _voiceTranscripts.update { it - voice.voiceId }
+                            if (_uiState.value.selectedVoiceId == voice.voiceId) {
+                                preferences.edit().remove("voice-id").apply()
+                                _uiState.update { it.copy(selectedVoiceId = null) }
+                            }
+                        }
+                        is PendingDeletion.Generation -> {
+                            val generation = pending.generation
+                            val files = mutableListOf(File(generation.wavPath))
+                            generation.reportPath?.let { path ->
+                                files += File(path)
+                                files += File(path).resolveSibling(File(path).nameWithoutExtension + ".txt")
+                            }
+                            files.forEach { PrivateFiles.child(generationDir, it) }
+                            files.forEach { PrivateFiles.deleteFile(generationDir, it) }
+                            dao.deleteGeneration(generation)
+                            if (generatedFile?.absolutePath == generation.wavPath) {
+                                generatedFile = null
+                                _uiState.update { it.copy(sampleCount = 0, sampleRate = 0, resultReportPath = null,
+                                    savedFileName = null, resultStatus = null, resultText = "") }
+                            }
+                        }
+                    }
+                }
             }
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            val status = if (result.isSuccess) when (pending) {
+                is PendingDeletion.Model -> "Modelo desinstalado; voces e historial conservados"
+                is PendingDeletion.Voice -> "Voz eliminada; audios del historial conservados"
+                is PendingDeletion.Generation -> "Audio y registro eliminados"
+            } else "No se pudo completar la eliminación"
+            refreshModelState(status)
+            _uiState.update { it.copy(error = result.exceptionOrNull()?.message, snackbarMessage = status) }
         }
     }
 
@@ -998,12 +1069,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteGeneration(generation: GenerationEntity) {
-        if (_uiState.value.playingGenerationId == generation.generationId) stopAudio()
-        viewModelScope.launch(Dispatchers.IO) {
-            dao.deleteGeneration(generation)
-            runCatching { File(generation.wavPath).delete() }
-            generation.reportPath?.let { path -> runCatching { File(path).delete(); File(path).resolveSibling(File(path).nameWithoutExtension + ".txt").delete() } }
-        }
+        if (!_uiState.value.busy && !recorderState.value.isRecording)
+            _uiState.update { it.copy(pendingDeletion = PendingDeletion.Generation(generation)) }
     }
 
     fun playAudio(historyGenerationId: Long? = null) {
@@ -1309,6 +1376,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 modelReady = ready,
                 downloadedModelIds = QwenModel.variants.filter { isModelReady(it) }.map { it.id }.toSet(),
+                storedModelIds = QwenModel.variants.filter { modelStorage.hasFiles(it) }.map { it.id }.toSet(),
                 busy = false,
                 downloading = false,
                 downloadTotalBytes = variant.totalBytes,
@@ -1500,6 +1568,7 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     VoiceTranscriptEditor(viewModel)
+    DeletionConfirmation(viewModel)
     val context = LocalContext.current
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
@@ -2064,6 +2133,70 @@ private fun HistoryScreen(viewModel: MainViewModel, onReuse: () -> Unit) {
 }
 
 @Composable
+private fun DeletionConfirmation(viewModel: MainViewModel) {
+    val state by viewModel.uiState.collectAsState()
+    val pending = state.pendingDeletion ?: return
+    val title: String
+    val message: String
+    val action: String
+    when (pending) {
+        is PendingDeletion.Model -> {
+            val variant = QwenModel.variantById(pending.modelId)
+            title = "¿Desinstalar modelo?"
+            message = "Se quitarán los archivos de ${variant.displayName}. Los códecs compartidos se conservan si otro modelo los necesita. Tus voces, referencias y audios del historial se conservan. Podés volver a descargarlo después."
+            action = "Desinstalar"
+        }
+        is PendingDeletion.Voice -> {
+            title = "¿Eliminar voz?"
+            message = "Se eliminarán la voz «${pending.voice.name}», su grabación de referencia y sus datos de clonación. Los audios del historial se conservan. Esta acción no se puede deshacer."
+            action = "Eliminar"
+        }
+        is PendingDeletion.Generation -> {
+            title = "¿Eliminar audio del historial?"
+            message = "Se eliminarán el audio #${pending.generation.generationId} y sus registros guardados en la app. Las copias que hayas exportado se conservan. Esta acción no se puede deshacer."
+            action = "Eliminar"
+        }
+    }
+    AlertDialog(
+        onDismissRequest = viewModel::dismissDeletion,
+        title = { Text(title) },
+        text = { Text(message, modifier = Modifier.verticalScroll(rememberScrollState())) },
+        confirmButton = {
+            TextButton(onClick = viewModel::confirmDeletion, enabled = !state.busy) {
+                Text(action, color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = viewModel::dismissDeletion, enabled = !state.busy) { Text("Cancelar") }
+        },
+    )
+}
+
+@Composable
+private fun InstalledModelsPanel(state: QwenTtsUiState, onUninstall: (String) -> Unit) {
+    val stored = QwenModel.variants.filter { it.id in state.storedModelIds }
+    if (stored.isEmpty()) return
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Modelos descargados", style = MaterialTheme.typography.titleMedium)
+            Text("Podés desinstalarlos sin borrar voces ni historial. Se pedirá confirmación.", style = MaterialTheme.typography.bodySmall)
+            stored.forEach { model ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(model.displayName, style = MaterialTheme.typography.bodyMedium)
+                        Text(if (model.id in state.downloadedModelIds) "Descargado" else "Archivos parciales",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                    IconButton(onClick = { onUninstall(model.id) }, enabled = !state.busy) {
+                        Icon(Icons.Default.Delete, contentDescription = "Desinstalar ${model.displayName}")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SettingsScreen(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
@@ -2088,6 +2221,7 @@ private fun SettingsScreen(viewModel: MainViewModel) {
             onDownload = viewModel::downloadModel,
             onLoad = viewModel::loadModel,
         )
+        InstalledModelsPanel(state, viewModel::uninstallModel)
         OutlinedButton(onClick = viewModel::releaseMemory, enabled = !state.busy) { Text("Liberar memoria del modelo") }
         Text("El modelo se libera automáticamente después de cada generación; cargarlo otra vez puede tardar.", style = MaterialTheme.typography.bodySmall)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -6,6 +6,23 @@ DotProd y FP16. Desde 0.3.3 se usa **solo CPU**; GPU está deshabilitada tras un
 bloqueo completo del S23 Ultra durante una prueba. NPU sin activar.
 Pocket TTS queda fuera del proyecto.
 
+## Versión 0.3.7: desinstalar modelos y confirmar eliminaciones
+
+[**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.7/Mi-Voz-Local-Android-arm64.apk)
+
+Instalar encima, sin desinstalar. Conserva certificado, voces, modelos e historial.
+
+- Ajustes → Modelos descargados permite desinstalar cada variante, incluyendo
+  descargas parciales. Conserva los códecs que necesita otro modelo del mismo
+  grupo y las copias reutilizadas por otras variantes. Se pueden descargar otra vez.
+- Eliminar un modelo, una voz o un audio del historial requiere confirmación.
+  El diálogo identifica qué se eliminará y permite cancelar sin modificar archivos.
+- Desinstalar modelos conserva voces e historial. Eliminar una voz conserva los
+  audios generados; eliminar un audio conserva las copias exportadas fuera de la app.
+- Las operaciones comprueban las rutas privadas y muestran los errores de borrado.
+  No cambia la selección de modelo, el muestreo ni los kernels CPU de 0.3.6.
+  GPU permanece deshabilitada.
+
 ## Versión 0.3.6: convoluciones CPU y comparaciones Q8
 
 [**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.6/Mi-Voz-Local-Android-arm64.apk)
