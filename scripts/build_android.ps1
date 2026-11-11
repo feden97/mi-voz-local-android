@@ -18,15 +18,17 @@ Push-Location -LiteralPath $projectRoot
 try {
     python scripts/prepare_native.py
     if ($LASTEXITCODE -ne 0) { throw 'No se pudieron preparar las fuentes nativas.' }
+    python scripts/prepare_asr.py
+    if ($LASTEXITCODE -ne 0) { throw 'No se pudieron preparar las fuentes del transcriptor local.' }
     $tasks = @(':app:assembleDebug')
     if (!$SkipChecks) { $tasks = @(':app:testDebugUnitTest', ':app:lintDebug') + $tasks }
     # Keep -CpuOnly accepted for existing callers; all builds are CPU-only now.
     & .\gradlew.bat --no-daemon "--max-workers=$Workers" '-Pqwen.opencl=false' '-Pqwen.vulkan=false' @tasks
     if ($LASTEXITCODE -ne 0) { throw "La compilacion fallo ($LASTEXITCODE)." }
-    python scripts/verify_native_build.py --expect-cpu-only
+    python scripts/verify_native_build.py --expect-cpu-only --expect-local-asr
     if ($LASTEXITCODE -ne 0) { throw 'El motor nativo no tiene las optimizaciones esperadas.' }
     $apk = Join-Path $projectRoot 'app\build\outputs\apk\debug\app-debug.apk'
-    python scripts/verify_apk.py $apk --expect-cpu-only
+    python scripts/verify_apk.py $apk --expect-cpu-only --expect-local-asr
     if ($LASTEXITCODE -ne 0) { throw 'La APK no contiene todos los componentes esperados.' }
     $artifactDir = Join-Path $projectRoot 'artifacts'
     New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null

@@ -49,8 +49,8 @@ android {
         applicationId = "ar.com.mivozlocal.android"
         minSdk = 31
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.3.3-dev"
+        versionCode = 7
+        versionName = "0.3.4"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -86,7 +86,7 @@ android {
     defaultConfig {
         externalNativeBuild {
             cmake {
-                targets += listOf("qwen3_tts_jni")
+                targets += listOf("qwen3_tts_jni", "mivoz_asr_jni")
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",

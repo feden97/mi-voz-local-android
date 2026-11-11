@@ -30,14 +30,20 @@ jobs:
       - name: Instalar herramientas Android
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
       - name: Preparar fuentes nativas fijadas
-        run: python scripts/prepare_native.py
+        run: |
+          python scripts/prepare_native.py
+          python scripts/prepare_asr.py
+      - name: Comprobar kernel BF16 ARM en emulación
+        run: |
+          python -m pip install --target .tooling/cpu-kernel-test unicorn==2.1.4
+          python scripts/verify_bf16_kernel.py
       - uses: gradle/actions/setup-gradle@v4
       - name: Compilar, comprobar y analizar
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --max-workers=3 -Pqwen.opencl=false -Pqwen.vulkan=false :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
-          python scripts/verify_native_build.py --expect-cpu-only
-          python scripts/verify_apk.py app/build/outputs/apk/debug/app-debug.apk --expect-cpu-only
+          python scripts/verify_native_build.py --expect-cpu-only --expect-local-asr
+          python scripts/verify_apk.py app/build/outputs/apk/debug/app-debug.apk --expect-cpu-only --expect-local-asr
       - name: Guardar APK
         uses: actions/upload-artifact@v4
         with:

@@ -75,6 +75,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -114,6 +115,9 @@ import com.qwen.tts.android.data.GenerationEstimate
 import com.qwen.tts.android.data.TextChunks
 import com.qwen.tts.android.data.StreamingWavWriter
 import com.qwen.tts.android.data.GenerationDiagnostics
+import com.qwen.tts.android.data.GenerationSampling
+import com.qwen.tts.android.data.ModelFileVerifier
+import com.qwen.tts.android.data.ReferenceTranscriber
 import com.qwen.tts.android.data.db.GenerationEntity
 import com.qwen.tts.android.data.db.QwenDatabase
 import com.qwen.tts.android.data.db.VoiceProfileEntity
@@ -222,6 +226,18 @@ data class QwenTtsUiState(
     val backgroundGenerationEnabled: Boolean = true,
     val supportsCloning: Boolean? = null,
     val speakerEmbeddingDim: Int = 0,
+    val temperature: Float = 0.9f,
+    val fixedSeedText: String = "",
+    val lastResolvedSeed: Int? = null,
+    val useIcl: Boolean = true,
+    val transcriptVoiceId: String? = null,
+    val transcriptDraft: String = "",
+    val transcriptionBusy: Boolean = false,
+    val transcriptionCancelling: Boolean = false,
+    val transcriptionStatus: String = "",
+    val transcriptionError: String? = null,
+    val asrModelReady: Boolean = false,
+    val downloadedModelIds: Set<String> = emptySet(),
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -231,6 +247,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = QwenDatabase.getDatabase(application).qwenDao()
     private val recorder = VoiceRecorder()
     private val preferences = application.getSharedPreferences("studio-settings", Application.MODE_PRIVATE)
+    private val modelVerifier = ModelFileVerifier(File(application.filesDir, "model-integrity"))
+    private val transcriber = ReferenceTranscriber(application)
     private val savedVariant = QwenModel.variantById(preferences.getString("model-id", null).orEmpty())
 
     val voices = dao.observeVoices().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -246,6 +264,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             backgroundGenerationEnabled = preferences.getBoolean("background-generation", true),
             modelReady = isModelReady(savedVariant),
             downloadTotalBytes = savedVariant.totalBytes,
+            temperature = preferences.getFloat("temperature", 0.9f).takeIf { it in 0.1f..1.5f } ?: 0.9f,
+            useIcl = preferences.getBoolean("use-icl", true),
+            asrModelReady = transcriber.modelAvailable,
+            selectedVoiceId = preferences.getString("voice-id", null),
         ),
     )
     val uiState = _uiState.asStateFlow()
@@ -257,6 +279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val cleared = AtomicBoolean(false)
     private var generatedFile: File? = null
     private var playJob: Job? = null
+    private var transcriptionJob: Job? = null
     private var operationTickerJob: Job? = null
     private var activePlayer: MediaPlayer? = null
 
@@ -283,6 +306,108 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateText(value: String) {
         _uiState.update { it.copy(text = value) }
+    }
+
+    fun updateTemperature(value: Float) {
+        if (_uiState.value.busy) return
+        val bounded = value.coerceIn(0.1f, 1.5f)
+        preferences.edit().putFloat("temperature", bounded).apply()
+        _uiState.update { it.copy(temperature = bounded) }
+    }
+
+    fun updateFixedSeed(value: String) {
+        if (!_uiState.value.busy) _uiState.update { it.copy(fixedSeedText = value.filter(Char::isDigit).take(10)) }
+    }
+
+    fun reuseLastSeed() {
+        _uiState.value.lastResolvedSeed?.let { updateFixedSeed(it.toString()) }
+    }
+
+    fun updateUseIcl(enabled: Boolean) {
+        if (_uiState.value.busy) return
+        preferences.edit().putBoolean("use-icl", enabled).apply()
+        _uiState.update { it.copy(useIcl = enabled) }
+    }
+
+    fun editTranscript(voice: VoiceProfileEntity) {
+        if (_uiState.value.busy || recorderState.value.isRecording) return
+        _uiState.update { it.copy(transcriptVoiceId = voice.voiceId,
+            transcriptDraft = _voiceTranscripts.value[voice.voiceId].orEmpty(),
+            transcriptionStatus = "", transcriptionError = null, asrModelReady = transcriber.modelAvailable) }
+    }
+
+    fun updateTranscriptDraft(text: String) {
+        if (!_uiState.value.transcriptionBusy) _uiState.update { it.copy(transcriptDraft = text) }
+    }
+
+    fun dismissTranscript() {
+        if (!_uiState.value.busy) {
+            stopAudio()
+            _uiState.update { it.copy(transcriptVoiceId = null, transcriptionError = null) }
+        }
+    }
+
+    fun saveTranscriptDraft() {
+        val voice = voices.value.firstOrNull { it.voiceId == _uiState.value.transcriptVoiceId } ?: return
+        if (_uiState.value.busy) return
+        stopAudio()
+        if (_uiState.value.transcriptDraft.isNotBlank()) updateUseIcl(true)
+        saveVoiceTranscript(voice, _uiState.value.transcriptDraft)
+    }
+
+    fun transcribeReference() {
+        if (_uiState.value.busy || recorderState.value.isRecording) return
+        val voice = voices.value.firstOrNull { it.voiceId == _uiState.value.transcriptVoiceId } ?: return
+        stopAudio()
+        transcriber.resetCancellation()
+        startBusy("Preparando transcripción local")
+        _uiState.update { it.copy(transcriptionBusy = true, transcriptionCancelling = false, transcriptionStatus = "Preparando…", transcriptionError = null) }
+        transcriptionJob = viewModelScope.launch {
+            try {
+                // ASR and TTS never compete for several GiB of resident weights.
+                withContext(Dispatchers.IO) {
+                    synchronized(nativeLock) { engine?.close(); engine = null }
+                }
+                _uiState.update { it.copy(loaded = false, activeBackendName = null) }
+                val draft = transcriber.transcribe(File(voice.referenceWavPath), language = "es") { progress ->
+                    _uiState.update { it.copy(transcriptionStatus = progress, status = progress) }
+                }
+                _uiState.update { it.copy(transcriptDraft = draft,
+                    transcriptionStatus = "Lista. Podés escuchar la referencia y corregir si hace falta.", status = "Transcripción lista") }
+            } catch (error: Throwable) {
+                if (error is CancellationException) {
+                    _uiState.update { it.copy(transcriptionStatus = "Transcripción cancelada", status = "Transcripción cancelada") }
+                } else {
+                    _uiState.update { it.copy(transcriptionError = error.message ?: "No se pudo transcribir la referencia.", status = "No se pudo transcribir") }
+                }
+            } finally {
+                stopBusyTicker()
+                transcriptionJob = null
+                _uiState.update { it.copy(busy = false, transcriptionBusy = false, transcriptionCancelling = false, asrModelReady = transcriber.modelAvailable) }
+            }
+        }
+    }
+
+    fun cancelTranscription() {
+        _uiState.update { it.copy(transcriptionCancelling = true, transcriptionStatus = "Cancelando transcripción…") }
+        transcriber.cancel()
+        transcriptionJob?.cancel()
+    }
+
+    fun playTranscriptReference() {
+        val voice = voices.value.firstOrNull { it.voiceId == _uiState.value.transcriptVoiceId } ?: return
+        if (_uiState.value.busy) return
+        stopAudio()
+        runCatching {
+            MediaPlayer().apply {
+                activePlayer = this
+                setDataSource(voice.referenceWavPath)
+                setOnCompletionListener { stopAudio() }
+                prepare()
+                start()
+            }
+            _uiState.update { it.copy(playing = true) }
+        }.onFailure { stopAudio(); _uiState.update { it.copy(transcriptionError = "No se pudo escuchar la referencia.") } }
     }
 
     fun updateBackgroundGeneration(enabled: Boolean) {
@@ -354,6 +479,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectVoice(voiceId: String?) {
+        if (_uiState.value.busy) return
+        preferences.edit().putString("voice-id", voiceId).apply()
         _uiState.update { it.copy(selectedVoiceId = voiceId) }
     }
 
@@ -490,9 +617,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val variant = selectedVariant()
         val selectedVoice = _uiState.value.selectedVoiceId?.let { id -> voices.value.firstOrNull { it.voiceId == id } }
+        if (_uiState.value.selectedVoiceId != null && selectedVoice == null) {
+            _uiState.update { it.copy(error = "Seleccioná una voz disponible antes de generar.") }; return
+        }
         val language = _uiState.value.selectedLanguageId
         val threads = selectedCpuThreadCount()
         val requestedBackend = selectedBackendOption()
+        val sampling = runCatching {
+            val seedText = _uiState.value.fixedSeedText
+            val seed = if (seedText.isBlank()) null else seedText.toIntOrNull()
+                ?: error("La semilla debe estar entre 1 y 2147483647.")
+            GenerationSampling(_uiState.value.temperature, seed).resolve()
+        }.getOrElse { error -> _uiState.update { it.copy(error = error.message) }; return }
+        val useIcl = _uiState.value.useIcl
+        _uiState.update { it.copy(lastResolvedSeed = sampling.seed) }
         stopAudio()
         backgroundFailure = null
         startBusy(status = "Preparando generación por fragmentos", resetSynthesis = true)
@@ -522,13 +660,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO) {
                 var writer: StreamingWavWriter? = null
                 try {
-                    val transcript = selectedVoice?.let { VoicePromptFiles.readTranscript(File(it.referenceWavPath)) }.orEmpty()
+                    val transcript = if (useIcl) selectedVoice?.let { VoicePromptFiles.readTranscript(File(it.referenceWavPath)) }.orEmpty() else ""
                     mode = if (transcript.isNotBlank()) "icl" else if (selectedVoice != null) "timbre" else "default"
                     diagnostics = GenerationDiagnostics(getApplication(), variant.id, variant.displayName, backend, threads,
                         mode, language, TextChunks.count(text), chunks.size,
                         visibilityProvider = { GenerationRuntime.isUiVisible },
                         foregroundServiceProvider = { GenerationRuntime.foregroundServiceActive },
-                        requestedBackend = requestedBackend.id)
+                        requestedBackend = requestedBackend.id, temperature = sampling.temperature,
+                        resolvedSeed = sampling.seed, seedMode = sampling.seedMode)
                     val diagnostic = requireNotNull(diagnostics)
                     diagnostic.noteExecution(background)
                     diagnostic.capture("before_preparation", true)
@@ -541,12 +680,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     withEngineContext { native ->
                         try {
                             val preparation = SystemClock.elapsedRealtime()
+                            val voicePreparation = SystemClock.elapsedRealtime()
                             val iclPrompt = selectedVoice?.takeIf { transcript.isNotBlank() }?.let {
                                 prepareIclPrompt(native, variant, File(it.referenceWavPath), transcript)
                             }
+                            diagnostic.stage("voice_prompt_preparation", SystemClock.elapsedRealtime() - voicePreparation)
                             throwIfCancelRequested(native)
                             _uiState.update { it.copy(generationPhase = "Cargando modelo") }
-                            ensureEngineLoaded(variant)
+                            ensureEngineLoaded(variant, diagnostic)
                             throwIfCancelRequested(native)
                             backend = native.getActiveBackendName().orEmpty().ifBlank { "Sin confirmar" }
                             diagnostic.setBackend(backend)
@@ -587,7 +728,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         etaIncludesDecode = tails.isNotEmpty(), etaObservedAtMillis = current.operationElapsedMillis,
                                         synthesisFrames = frames, maxAudioTokens = if (maxTokens >= 0) maxTokens else current.maxAudioTokens) }
                                 }
-                                val params = QwenEngine.NativeParams(languageId = language)
+                                val params = QwenEngine.NativeParams(languageId = language,
+                                    temperature = sampling.temperature, seed = sampling.seedForChunk(index).toLong())
                                 val chunkText = chunk.trim()
                                 val nativeCallStartedAt = SystemClock.elapsedRealtime()
                                 val result = if (iclPrompt != null) native.synthesizeWithIclPrompt(chunkText, iclPrompt.absolutePath, params)
@@ -609,6 +751,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     observedTimings = mapOf("nativeCall" to (nativeCallReturnedAt - nativeCallStartedAt),
                                         "beforeDecodeEvent" to decodeStartedAt?.let { it - nativeCallStartedAt },
                                         "afterDecodeEvent" to decodeStartedAt?.let { nativeCallReturnedAt - it }))
+                                diagnostic.nativeDetails(index + 1, result.resolvedSeed, result.nativeTimingsJson)
                                 diagnostic.checkpoint()
                                 if (truncated) { diagnostic.warning("Se alcanzó el límite acústico; se detuvo el trabajo para evitar omisiones silenciosas."); break }
                                 val duration = audio.size.toDouble() / result.sampleRate
@@ -777,6 +920,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             created.fold(
                 onSuccess = { voice ->
                     stopBusyTicker()
+                    preferences.edit().putString("voice-id", voice.voiceId).apply()
                     _uiState.update {
                         it.copy(
                             busy = false,
@@ -816,11 +960,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             stopBusyTicker()
             result.onSuccess { saved ->
                 _voiceTranscripts.update { it + (voice.voiceId to saved) }
-                _uiState.update { it.copy(busy = false, status = "Transcripción guardada", error = null,
+                _uiState.update { it.copy(busy = false, status = "Transcripción guardada", error = null, transcriptVoiceId = null,
                     snackbarMessage = if (saved.isBlank()) "Modo solo timbre: sin transcripción" else "ICL activado; se preparará al generar") }
             }.onFailure { error ->
                 if (error is CancellationException) throw error
-                _uiState.update { it.copy(busy = false, status = "No se pudo guardar la transcripción", error = error.message) }
+                _uiState.update { it.copy(busy = false, status = "No se pudo guardar la transcripción", error = error.message, transcriptionError = error.message) }
             }
         }
     }
@@ -831,6 +975,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             dao.deleteVoice(voice)
             runCatching { File(voice.referenceWavPath).parentFile?.deleteRecursively() }
             if (_uiState.value.selectedVoiceId == voice.voiceId) {
+                preferences.edit().remove("voice-id").apply()
                 _uiState.update { it.copy(selectedVoiceId = null) }
             }
         }
@@ -1026,23 +1171,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return prompt
     }
 
-    private fun ensureEngineLoaded(variant: ModelVariant): QwenEngine {
+    private fun ensureEngineLoaded(variant: ModelVariant, diagnostics: GenerationDiagnostics? = null): QwenEngine {
         if (!_uiState.value.loaded) {
+            val checkStarted = SystemClock.elapsedRealtime()
+            _uiState.update { it.copy(generationPhase = "Verificando modelo") }
             variant.files.forEach { file ->
                 check(isVerifiedModelFile(File(modelDirectory(variant), file.name), file)) {
                     "El archivo ${file.name} no coincide con el modelo esperado. Volvé a descargarlo en Ajustes."
                 }
             }
+            diagnostics?.stage("model_integrity_check", SystemClock.elapsedRealtime() - checkStarted)
         }
         val native = engine ?: QwenEngine().also { engine = it }
         configureBackend(native)
         val threads = selectedCpuThreadCount()
         native.setCpuThreads(threads)
         if (!_uiState.value.loaded) {
+            val loadStarted = SystemClock.elapsedRealtime()
+            _uiState.update { it.copy(generationPhase = "Cargando modelo") }
             if (!native.loadModels(modelDirectory(variant).absolutePath, variant.talkerName)) {
                 val reason = native.getLastError() ?: "No se pudo cargar el modelo local"
                 error(if (selectedBackendOption().id == "gpu") "$reason. Podés volver a CPU en Ajustes → Rendimiento." else reason)
             }
+            diagnostics?.stage("native_model_load", SystemClock.elapsedRealtime() - loadStarted)
             val caps = native.getModelCapabilities()
             _uiState.update {
                 it.copy(
@@ -1061,7 +1212,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun speakerEmbeddingFor(native: QwenEngine, voice: VoiceProfileEntity, variant: ModelVariant): String {
         val reference = File(voice.referenceWavPath)
         check(reference.isFile) { "No se encuentra la referencia de ${voice.name}. Volvé a importar esa voz." }
-        val embedding = File(reference.parentFile, "speaker-${variant.id}.json")
+        val embeddingVariantId = if (variant.id == "1_7b_q4_bf16_codec") "1_7b_q4_k_m" else variant.id
+        val embedding = File(reference.parentFile, "speaker-$embeddingVariantId.json")
         if (!embedding.isFile || embedding.length() == 0L) {
             val success = native.extractSpeakerEmbedding(reference.absolutePath, embedding.absolutePath)
             if (!success) {
@@ -1156,6 +1308,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 modelReady = ready,
+                downloadedModelIds = QwenModel.variants.filter { isModelReady(it) }.map { it.id }.toSet(),
                 busy = false,
                 downloading = false,
                 downloadTotalBytes = variant.totalBytes,
@@ -1178,18 +1331,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     private fun isVerifiedModelFile(local: File, expected: ModelFile): Boolean {
-        if (!local.isFile || local.length() != expected.sizeBytes) return false
-        val digest = MessageDigest.getInstance("SHA-256")
-        local.inputStream().buffered().use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
-        }
-        val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-        return actual == expected.sha256
+        return modelVerifier.isVerified(local, expected)
     }
 
     private fun downloadFiles(variant: ModelVariant) {
@@ -1197,7 +1339,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var completedBytes = 0L
         variant.files.forEachIndexed { index, file ->
             val target = File(directory, file.name)
-            if (isVerifiedModelFile(target, file)) {
+            // Explicit repair always hashes again, even when a previous receipt exists.
+            if (modelVerifier.verifyFresh(target, file)) {
+                completedBytes += file.sizeBytes
+                return@forEachIndexed
+            }
+            val reusable = QwenModel.variants.asSequence().map { File(modelDirectory(it), file.name) }
+                .distinctBy { it.absolutePath }.firstOrNull {
+                    it.absolutePath != target.absolutePath && isVerifiedModelFile(it, file)
+                }
+            if (reusable != null) {
+                _uiState.update { it.copy(status = "Reutilizando ${file.name}") }
+                val pending = File(directory, ".${file.name}.${UUID.randomUUID()}.reuse")
+                try {
+                    val linked = runCatching { java.nio.file.Files.createLink(pending.toPath(), reusable.toPath()) }.isSuccess
+                    if (!linked) {
+                        check(directory.usableSpace >= file.sizeBytes + 64L * 1024 * 1024) { "Falta espacio para preparar esta variante." }
+                        reusable.copyTo(pending, overwrite = true)
+                    }
+                    check(modelVerifier.verifyFresh(pending, file)) { "No se pudo verificar el archivo reutilizado." }
+                    try {
+                        java.nio.file.Files.move(pending.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+                    } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                        java.nio.file.Files.move(pending.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    }
+                } finally { pending.delete() }
+                check(modelVerifier.verifyFresh(target, file)) { "No se pudo verificar el modelo reutilizado." }
                 completedBytes += file.sizeBytes
                 return@forEachIndexed
             }
@@ -1242,7 +1410,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
               }
-              check(isVerifiedModelFile(temp, file)) { "Descarga incompleta o SHA-256 incorrecto: ${file.name}" }
+              check(modelVerifier.verifyFresh(temp, file)) { "Descarga incompleta o SHA-256 incorrecto: ${file.name}" }
               check(!target.exists() || target.delete()) { "No se pudo reemplazar ${file.name}" }
               check(temp.renameTo(target)) { "No se pudo guardar ${file.name}" }
             } finally {
@@ -1265,6 +1433,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cleared.set(true)
         cancelRequested.set(true)
         engine?.requestCancel()
+        transcriber.cancel()
         recorder.cancel()
         stopAudio()
         stopBusyTicker()
@@ -1330,6 +1499,7 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
     val currentRoute = backStackEntry?.destination?.route ?: AppDestination.Studio.route
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    VoiceTranscriptEditor(viewModel)
     val context = LocalContext.current
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
@@ -1420,6 +1590,98 @@ private fun destinationIndex(route: String?): Int =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun StudioModelSelector(state: QwenTtsUiState, onSelect: (String) -> Unit, onPrepare: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = QwenModel.variantById(state.selectedModelId)
+    ExposedDropdownMenuBox(expanded = expanded && !state.busy, onExpandedChange = { if (!state.busy) expanded = it }) {
+        OutlinedTextField(value = selected.displayName, onValueChange = {}, readOnly = true,
+            enabled = !state.busy, label = { Text("Modelo") },
+            supportingText = { Text(if (state.loaded) "Preparado en memoria" else if (state.modelReady) "Descargado; se prepara al generar" else "Necesita preparar los archivos") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor().fillMaxWidth())
+        ExposedDropdownMenu(expanded = expanded && !state.busy, onDismissRequest = { expanded = false }) {
+            QwenModel.variants.sortedByDescending { it.id in state.downloadedModelIds }.forEach { variant ->
+                DropdownMenuItem(text = { Text(variant.displayName + if (variant.id in state.downloadedModelIds) " · descargado" else "") },
+                    onClick = { expanded = false; onSelect(variant.id) })
+            }
+        }
+    }
+    if (!state.modelReady) {
+        OutlinedButton(onClick = onPrepare, enabled = !state.busy) { Text("Preparar / descargar modelo") }
+        if (state.downloading) LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun SamplingPanel(state: QwenTtsUiState, onTemperature: (Float) -> Unit, onSeed: (String) -> Unit, onReuseSeed: () -> Unit) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    OutlinedButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Ocultar ajustes de variación" else "Variación y comparación de tomas") }
+    if (expanded) {
+        ElevatedCard {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Temperatura: ${String.format(Locale.getDefault(), "%.2f", state.temperature)}", fontWeight = FontWeight.SemiBold)
+                Slider(value = state.temperature, onValueChange = onTemperature, valueRange = 0.1f..1.5f,
+                    enabled = !state.busy)
+                Text("0,9 es el ajuste habitual. Valores mayores agregan variación; no garantizan más emoción.", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(value = state.fixedSeedText, onValueChange = onSeed,
+                    label = { Text("Semilla fija (opcional)") }, singleLine = true, enabled = !state.busy,
+                    supportingText = { Text("Vacío: una toma nueva. Número de 1 a 2147483647: repetir o comparar ajustes.") },
+                    keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth())
+                state.lastResolvedSeed?.let { seed ->
+                    TextButton(onClick = onReuseSeed, enabled = !state.busy) { Text("Usar última semilla: $seed") }
+                }
+                Text("Para comparar, conservá voz, texto, modelo y semilla. Cambiar modelo o modo puede cambiar la toma incluso con igual semilla.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceTranscriptEditor(viewModel: MainViewModel) {
+    val state by viewModel.uiState.collectAsState()
+    val voices by viewModel.voices.collectAsState()
+    val voice = voices.firstOrNull { it.voiceId == state.transcriptVoiceId } ?: return
+    AlertDialog(
+        onDismissRequest = viewModel::dismissTranscript,
+        title = { Text("Transcripción de ${voice.name}") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Usá las palabras de la grabación original. La transcripción automática es local y podés corregirla antes de activar ICL.")
+                OutlinedButton(onClick = viewModel::transcribeReference, enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text(if (state.asrModelReady) "Transcribir automáticamente (español)" else "Descargar transcriptor y transcribir (60 MB)")
+                }
+                if (!state.asrModelReady) Text("La descarga inicial necesita Internet. El audio permanece en el teléfono; después funciona sin conexión.", style = MaterialTheme.typography.bodySmall)
+                if (state.transcriptionBusy) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    TextButton(onClick = viewModel::cancelTranscription, enabled = !state.transcriptionCancelling) {
+                        Text(if (state.transcriptionCancelling) "Cancelando…" else "Cancelar transcripción")
+                    }
+                }
+                if (state.transcriptionStatus.isNotBlank()) Text(state.transcriptionStatus, style = MaterialTheme.typography.bodySmall)
+                state.transcriptionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                OutlinedTextField(value = state.transcriptDraft, onValueChange = viewModel::updateTranscriptDraft,
+                    modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 7, enabled = !state.busy,
+                    label = { Text("Texto exacto de la referencia") },
+                    isError = state.transcriptDraft.length > VoicePromptFiles.MAX_TRANSCRIPT_CHARS,
+                    supportingText = { Text("${state.transcriptDraft.length}/${VoicePromptFiles.MAX_TRANSCRIPT_CHARS}. Vacío: solo timbre.") })
+                TextButton(onClick = { if (state.playing) viewModel.stopAudio() else viewModel.playTranscriptReference() }, enabled = !state.busy) {
+                    Text(if (state.playing) "Detener referencia" else "Escuchar referencia original")
+                }
+                Text("Si coincide con lo que escuchás, podés usarla directamente. Un resultado convincente del transcriptor no garantiza que cada palabra sea correcta.", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = viewModel::saveTranscriptDraft,
+            enabled = !state.busy && state.transcriptDraft.length <= VoicePromptFiles.MAX_TRANSCRIPT_CHARS) {
+            Text(if (state.transcriptDraft.isBlank()) "Usar solo timbre" else "Usar transcripción")
+        } },
+        dismissButton = { TextButton(onClick = viewModel::dismissTranscript, enabled = !state.busy) { Text("Cerrar") } },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun StudioScreen(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsState()
     val studioContext = LocalContext.current
@@ -1467,6 +1729,7 @@ private fun StudioScreen(viewModel: MainViewModel) {
             state.error?.let { error ->
                 Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
+            StudioModelSelector(state, viewModel::selectModel, viewModel::downloadModel)
             ComposerPanel(
                 state = state,
                 selectedVoiceName = selectedVoiceName,
@@ -1477,11 +1740,24 @@ private fun StudioScreen(viewModel: MainViewModel) {
             Text(
                 when {
                     state.selectedVoiceId == null -> "Voz del modelo: no usa una referencia personal."
-                    !transcripts[state.selectedVoiceId.orEmpty()].isNullOrBlank() -> "Clonación con audio y sus palabras escritas (ICL)."
+                    state.useIcl && !transcripts[state.selectedVoiceId.orEmpty()].isNullOrBlank() -> "Clonación con audio y sus palabras escritas (ICL)."
                     else -> "Solo timbre: en Voces podés escribir lo que dice la grabación original para usar también su contenido al clonar."
                 },
                 style = MaterialTheme.typography.bodySmall,
             )
+            voices.firstOrNull { it.voiceId == state.selectedVoiceId }?.let { voice ->
+                val hasTranscript = !transcripts[voice.voiceId].isNullOrBlank()
+                if (hasTranscript) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Usar audio + transcripción (ICL)", modifier = Modifier.weight(1f))
+                        Switch(checked = state.useIcl, onCheckedChange = viewModel::updateUseIcl, enabled = !state.busy)
+                    }
+                }
+                TextButton(onClick = { viewModel.editTranscript(voice) }, enabled = !state.busy) {
+                    Text(if (hasTranscript) "Ver transcripción de ${voice.name}" else "Transcribir ${voice.name} para ICL")
+                }
+            }
+            SamplingPanel(state, viewModel::updateTemperature, viewModel::updateFixedSeed, viewModel::reuseLastSeed)
             if ((state.busy && !state.downloading) || state.sampleCount > 0 || state.resultReportPath != null) {
                 ResultPanel(
                     state = state,
@@ -1532,8 +1808,6 @@ private fun VoicesScreen(viewModel: MainViewModel) {
     val context = LocalContext.current
     var voiceName by rememberSaveable { mutableStateOf("") }
     var referenceText by rememberSaveable { mutableStateOf("") }
-    var editingVoice by remember { mutableStateOf<VoiceProfileEntity?>(null) }
-    var editedText by rememberSaveable { mutableStateOf("") }
     var hasPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
@@ -1558,36 +1832,6 @@ private fun VoicesScreen(viewModel: MainViewModel) {
             voiceName = ""
             referenceText = ""
         }
-    }
-
-    editingVoice?.let { voice ->
-        AlertDialog(
-            onDismissRequest = { if (!state.busy) editingVoice = null },
-            title = { Text("Transcripción de ${voice.name}") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Escribí exactamente lo que se oye en el WAV de referencia, con sus pausas y puntuación. Dejalo vacío para usar solo timbre.")
-                    OutlinedTextField(
-                        value = editedText,
-                        onValueChange = { editedText = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 4,
-                        maxLines = 8,
-                        enabled = !state.busy,
-                        label = { Text("Texto exacto de la referencia") },
-                        isError = editedText.length > VoicePromptFiles.MAX_TRANSCRIPT_CHARS,
-                        supportingText = { Text("${editedText.length}/${VoicePromptFiles.MAX_TRANSCRIPT_CHARS}") },
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = !state.busy && editedText.length <= VoicePromptFiles.MAX_TRANSCRIPT_CHARS,
-                    onClick = { viewModel.saveVoiceTranscript(voice, editedText); editingVoice = null },
-                ) { Text("Guardar") }
-            },
-            dismissButton = { TextButton(enabled = !state.busy, onClick = { editingVoice = null }) { Text("Cancelar") } },
-        )
     }
 
     Column(
@@ -1696,10 +1940,7 @@ private fun VoicesScreen(viewModel: MainViewModel) {
                             onSelect = { viewModel.selectVoice(voice.voiceId) },
                             conditioningLabel = if (transcripts[voice.voiceId].isNullOrBlank()) "Solo timbre: sin transcripción" else "ICL: audio y texto",
                             enabled = !state.busy && !recorderState.isRecording,
-                            onEditTranscript = {
-                                editedText = transcripts[voice.voiceId].orEmpty()
-                                editingVoice = voice
-                            },
+                            onEditTranscript = { viewModel.editTranscript(voice) },
                             onDelete = { viewModel.deleteVoice(voice) },
                         )
                     }

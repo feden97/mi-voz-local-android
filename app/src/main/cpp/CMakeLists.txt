@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(qwen3_tts_android LANGUAGES C CXX)
+add_compile_definitions(QWEN3_TTS_TIMING)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -178,3 +179,5 @@ add_library(qwen3_tts_jni SHARED
 target_include_directories(qwen3_tts_jni PRIVATE "${QWEN3_TTS_ROOT}/src")
 target_compile_definitions(qwen3_tts_jni PRIVATE QWEN3_TTS_STATIC)
 target_link_libraries(qwen3_tts_jni PRIVATE qwen3_tts log)
+
+include("${CMAKE_CURRENT_LIST_DIR}/asr.cmake")

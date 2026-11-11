@@ -6,6 +6,37 @@ DotProd y FP16. Desde 0.3.3 se usa **solo CPU**; GPU está deshabilitada tras un
 bloqueo completo del S23 Ultra durante una prueba. NPU sin activar.
 Pocket TTS queda fuera del proyecto.
 
+## Versión 0.3.4: ICL local y CPU BF16
+
+[**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.4/Mi-Voz-Local-Android-arm64.apk)
+
+Instalar encima, sin desinstalar. Conserva applicationId, certificado, voces,
+modelos e historial. GPU sigue deshabilitada.
+
+- Transcripción automática local de referencias en español: Whisper Base
+  multilingüe Q5, descarga inicial de unos 60 MB. Luego funciona sin conexión.
+  En Voces → editar transcripción o desde Estudio, transcribir, escuchar la
+  referencia y corregir si hace falta. **Usar transcripción** guarda y activa ICL;
+  una transcripción correcta se puede usar directamente sin editarla.
+- Alternar ICL y Solo timbre desde Estudio sin borrar el texto de referencia.
+  ICL puede aumentar la preparación y el coste de generación; no garantiza emoción.
+- Selector de modelo en Estudio, carga automática al generar, temperatura ajustable
+  y semilla efectiva fija o aleatoria registrada por trabajo y fragmento.
+- Producto punto BF16 con implementación ARM NEON, conservando los pesos originales.
+  Perfil interno nativo para medir generador/Predictor/decodificador. Falta medir
+  velocidad y calidad de esta actualización en el S23; no se promete un factor.
+- Variante experimental 1.7B Talker Q4 + códec BF16. Reutiliza archivos ya descargados
+  al preparar la variante y mantiene los prompts ICL separados.
+- Comprobantes privados de integridad evitan releer todos los pesos si sus metadatos
+  e identidad no cambian. **Verificar y reparar** siempre calcula SHA-256 completo.
+  Si el sistema de archivos no ofrece metadatos suficientes se verifica íntegramente.
+
+El audio, los textos y las voces permanecen en el teléfono. Sólo se descargan
+modelos públicos; no se usan servicios de reconocimiento externos. Una transcripción
+automática convincente puede contener errores: escuchar la referencia es la forma
+más práctica de comprobar las palabras. La referencia sólo necesita transcribirse
+una vez; el texto y los prompts se reutilizan después.
+
 ## Versión 0.3.3: solo CPU
 
 [**Descargar APK Android**](https://github.com/feden97/mi-voz-local-android/releases/download/v0.3.3/Mi-Voz-Local-Android-arm64.apk)
@@ -78,7 +109,8 @@ cada resultado a un modelo. Los registros nuevos evitan esa ambigüedad.
    sin música ni eco. Se recomiendan unos 10 segundos.
 3. Opcionalmente escribir las palabras exactas del **audio de referencia**: si dice
    «Hola, soy Ana», escribir eso, **no el guion nuevo**. Con transcripción usa ICL;
-   sin ella usa Solo timbre. No hay transcripción automática integrada en la APK.
+   sin ella usa Solo timbre. Desde 0.3.4 se puede transcribir automáticamente en el
+   teléfono, revisar el borrador y usarlo para ICL.
 4. En Estudio, escribir el guion, comprobar el contador y generar.
 5. Escuchar todo y exportar el WAV o el registro desde Historial → Más.
 
@@ -118,6 +150,7 @@ Para repetir el guion se usa Copiar texto original por separado.
 | 1.7B Q4_K_M | 1,47 GB |
 | 0.6B BF16 | 2,20 GB |
 | 1.7B BF16 | 4,24 GB |
+| 1.7B Q4 + códec BF16 | 1,58 GB |
 
 GB decimales, no RAM requerida. BF16 es precisión de 16 bits, no F32. Se descarga
 solo la variante elegida y el códec se comparte por precisión. Las voces regionales

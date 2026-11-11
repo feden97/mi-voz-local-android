@@ -9,6 +9,12 @@ La licencia original se conserva íntegra en `LICENSE`.
   revisión `4562731dc612cb87b4cd1eedac275a17d1078773`, MIT.
 - GGML: https://github.com/ggml-org/ggml,
   revisión `eced84c86f8b012c752c016f7fe789adea168e1e`, MIT.
+- Transcriptor local whisper.cpp: https://github.com/ggml-org/whisper.cpp,
+  revisión `4979e04f5dcaccb36057e059bbaed8a2f5288315` (1.8.2), MIT.
+  Modelo Whisper Base multilingüe Q5_1, MIT, descargado bajo demanda desde
+  https://huggingface.co/ggerganov/whisper.cpp, revisión
+  `5359861c739e955e79d9a303bcbc70fb988958b1`.
+  Ambas licencias están en `app/src/main/assets/licenses/whisper-*-MIT.txt`.
 - Cabeceras y declaraciones OpenCL: https://github.com/KhronosGroup/OpenCL-Headers,
   versión `v2025.07.22`, Apache 2.0. Licencia conservada en
   `app/src/main/assets/licenses/OpenCL-Headers.txt`. El driver OpenCL del fabricante

@@ -33,4 +33,5 @@ exports/
 .research/
 artifacts/
 .codex-attachments/
+.codex-remote-attachments/
 

@@ -41,6 +41,9 @@ internal class GenerationDiagnostics(
     visibilityProvider: (() -> Boolean)? = null,
     foregroundServiceProvider: (() -> Boolean)? = null,
     requestedBackend: String = "cpu",
+    temperature: Float = 0.9f,
+    resolvedSeed: Int? = null,
+    seedMode: String = "random_per_job",
 ) {
     private val app = context.applicationContext
     private val started = SystemClock.elapsedRealtime()
@@ -115,7 +118,7 @@ internal class GenerationDiagnostics(
             .put("engine", JSONObject().put("name", "qwen3-tts.cpp")
                 .put("revision", "4562731dc612cb87b4cd1eedac275a17d1078773")
                 .put("ggmlRevision", "eced84c86f8b012c752c016f7fe789adea168e1e")
-                .put("localChanges", "cooperative CPU cancellation; decode-phase event; CPU-only build; independent diagnostic sampling and historical process exit records"))
+                .put("localChanges", "CPU-only; ARM NEON BF16 dot product; cooperative cancellation; effective temperature/seed and native timing instrumentation"))
             .put("parameters", JSONObject().put("backend", backend).put("requestedBackend", requestedBackend).put("cpuThreads", cpuThreads)
                 .put("cloningMode", cloningMode).put("languageId", languageId)
                 .put("inputCharacters", textCharacters).put("plannedChunks", plannedChunks)
@@ -123,11 +126,11 @@ internal class GenerationDiagnostics(
                     .put("shortTextSingleChunk", true)
                     .put("policy", "Keep short texts together; prefer natural boundaries for longer texts. Acoustic token limit is independent."))
                 .put("maxAudioTokensPerChunk", maxAudioTokens).put("secondsPerAcousticFrame", 0.08)
-                .put("nativeOptimization", "O3; NDEBUG; ARMv8.2-a+dotprod+fp16")
-                .put("sampling", JSONObject().put("temperature", 0.9).put("topP", 1.0).put("topK", 50)
+                .put("nativeOptimization", "O3; NDEBUG; ARMv8.2-a+dotprod+fp16; BF16 NEON")
+                .put("sampling", JSONObject().put("temperature", temperature.toDouble()).put("topP", 1.0).put("topK", 50)
                     .put("repetitionPenalty", 1.05).put("vocoderLeftContextSeconds", 2.0)
-                    .put("seedMode", "random_per_synthesis").put("resolvedSeed", JSONObject.NULL)
-                    .put("reproducibility", "Resolved native seed is not exposed; no independent predictor seed or sub_temperature API")))
+                    .put("seedMode", seedMode).put("resolvedSeed", resolvedSeed ?: JSONObject.NULL)
+                    .put("reproducibility", "Effective seed recorded per chunk; same parameters aid comparison but do not guarantee identical output across models or kernels")))
             .put("memorySamples", snapshots).put("stages", stages).put("chunks", chunks).put("warnings", warnings)
             .put("events", events)
             .put("previousProcessExits", ProcessExitHistory.snapshot(app))
@@ -146,6 +149,26 @@ internal class GenerationDiagnostics(
                 "Periodic samples run on an independent IO coroutine every 10 seconds, including decoder time; captureDurationMillis records their observed collection cost.",
                 "The journal is written before preparation and periodically; incomplete chunks do not imply recoverable audio.",
             )))
+    }
+
+    /** Accept numeric profiling fields only; never persist native text/log output. */
+    @Synchronized
+    fun nativeDetails(index: Int, seed: Long, timingJson: String?) {
+        val chunk = (0 until chunks.length()).map { chunks.getJSONObject(it) }
+            .firstOrNull { it.optInt("index") == index } ?: return
+        chunk.put("resolvedSeed", seed)
+        val timing = runCatching { timingJson?.let { JSONObject(it) } }.getOrNull() ?: return
+        fun numericFields(input: JSONObject, depth: Int): JSONObject {
+            val clean = JSONObject()
+            input.keys().asSequence().take(100).forEach { key ->
+                if (!key.matches(Regex("[A-Za-z][A-Za-z0-9_]{0,63}"))) return@forEach
+                val value = input.opt(key)
+                if (value is Number && value.toDouble().isFinite()) clean.put(key, value)
+                else if (value is JSONObject && depth < 1) clean.put(key, numericFields(value, depth + 1))
+            }
+            return clean
+        }
+        chunk.put("nativeProfile", numericFields(timing, 0))
     }
 
     @Synchronized
@@ -358,6 +381,9 @@ internal class GenerationDiagnostics(
             if (parameters.has("requestedBackend")) appendLine("Motor solicitado: ${parameters.optString("requestedBackend")}")
             if (parameters.optString("requestedBackend") == "gpu") appendLine("El motor GPU puede ejecutar algunas operaciones en CPU; su nombre no indica que todo el trabajo ocurra en GPU.")
             appendLine("Modo de voz: ${parameters.optString("cloningMode")} / idioma ${parameters.optInt("languageId")}")
+            parameters.optJSONObject("sampling")?.let { sampling ->
+                appendLine("Muestreo: temperatura ${sampling.optDouble("temperature")}; semilla ${sampling.opt("resolvedSeed")}; modo ${sampling.optString("seedMode")}")
+            }
             appendLine("Entrada: ${parameters.optInt("inputCharacters")} caracteres / ${parameters.optInt("plannedChunks")} fragmentos previstos")
             parameters.optJSONObject("chunking")?.let {
                 appendLine("Fragmentación: hasta ${it.optInt("maxCharactersPerChunk")} caracteres por llamada; textos cortos en una llamada y cortes naturales en textos largos.")
@@ -400,6 +426,11 @@ internal class GenerationDiagnostics(
             for (i in 0 until chunks.length()) {
                 val chunk = chunks.getJSONObject(i)
                 appendLine("- ${chunk.optInt("index")}: ${chunk.optInt("characters")} caracteres; ${chunk.optLong("nativeMillis")} ms nativos; ${"%.2f".format(Locale.US, chunk.optDouble("audioSeconds"))} s audio")
+                if (chunk.has("resolvedSeed")) appendLine("  Semilla efectiva: ${chunk.optLong("resolvedSeed")}")
+                chunk.optJSONObject("phaseMillis")?.let { phase ->
+                    appendLine("  Fases nativas (ms): $phase")
+                }
+                chunk.optJSONObject("nativeProfile")?.let { profile -> appendLine("  Perfil nativo: $profile") }
                 chunk.optJSONObject("observedPhaseMillis")?.let { observed ->
                     fun measured(name: String): String = if (observed.isNull(name)) "sin dato" else "${observed.optLong(name)} ms"
                     appendLine("  Tiempos observados: llamada JNI ${measured("nativeCall")}; antes del evento de decodificación ${measured("beforeDecodeEvent")}; después del evento ${measured("afterDecodeEvent")}.")

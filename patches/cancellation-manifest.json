@@ -1,9 +1,11 @@
 [
   {
     "path": "gguf_loader.cpp",
-    "kind": "gpu_backend",
+    "kind": "cpu_backend",
     "upstream_sha256": "2867bc7846c4b4292a05ffde7495a014af0cb6e8e9afcf4c2916e7045ddad682",
-    "patched_sha256": "2a2e4b4c5961b066974faa12b69458e9273004d31e6da2fa3c697ae48d4f6d63"
+    "patched_sha256": "27189b02df6d62aec1285be67dd402f5ed5ca32ac55081ae2341bc6b2ad5e206",
+    "legacy_sha256": "2a2e4b4c5961b066974faa12b69458e9273004d31e6da2fa3c697ae48d4f6d63",
+    "legacy_kind": "cpu_backend"
   },
   {
     "path": "decoder/decoder_runtime.cpp",
@@ -21,7 +23,9 @@
     "path": "qwen3_tts_jni.cpp",
     "kind": "jni",
     "upstream_sha256": "fd00211260057f4dbaab08b786935ce2e1880067163f68a4404c2acd8bcca412",
-    "patched_sha256": "5e9fe4d932b8564658939b2dc175918bf8f49eb8dbc0f6ff2aa29af8e35c0f38"
+    "patched_sha256": "4a2e81385d74eb5645d43e93f60e74fe035d783272641f43f91fa3f1337e2840",
+    "legacy_sha256": "5e9fe4d932b8564658939b2dc175918bf8f49eb8dbc0f6ff2aa29af8e35c0f38",
+    "legacy_kind": "jni_cpu"
   },
   {
     "path": "speech_tokenizer_encoder.cpp",
@@ -52,5 +56,30 @@
     "kind": "decode_phase",
     "upstream_sha256": "c166e96887613b35877d1983d0d23be8910e4dd4b6d2e8ad72fc5143b21742f2",
     "patched_sha256": "7c6af01762db6d18c9acd85084d16e841d4437b9e097be6a3addfccaa42f0145"
+  },
+  {
+    "path": "qwen3_tts_c.h",
+    "kind": "c_sampling_header",
+    "upstream_sha256": "96a5b93e602820f96e159ce2618cea8a101150c64d1821541f42f5f9e7c28ef5",
+    "patched_sha256": "9fa5f978eebffec97c0e7b443f4b92f7e54ef2a0dc607dba4fe57e34b42344a2"
+  },
+  {
+    "path": "qwen3_tts_c.cpp",
+    "kind": "c_sampling_result",
+    "upstream_sha256": "7c1757b646d6551740eb1477f895a1273424fa16ec5df7adc78a41d1e9a93fb9",
+    "patched_sha256": "72593ad3d14cfe0be5fd70ed4fcb45ef7636785fe56c51ca38c3fdf7125dd7fb"
+  },
+  {
+    "path": "transformer/transformer_generate.cpp",
+    "kind": "transformer_metrics",
+    "upstream_sha256": "a01a9cacc9cb12769d7264ae3fd968fc88435588d23a24479c6e450ff4d4e375",
+    "patched_sha256": "98d5ed63715f0477bab2619d6528e9b3950f9ed58e7405f23c1495dfd1c5d391"
+  },
+  {
+    "path": "ggml-cpu/vec.cpp",
+    "kind": "bf16_neon",
+    "upstream_sha256": "cda0babb53f9c8ff1faa7459b2c49019d15e5970dfe0c613d58e2659e919f524",
+    "patched_sha256": "59441fb7c6782e08e2d80602bd87b47affe8e166cc6cdc59fcc6f341a57a0371",
+    "scope": "ggml"
   }
 ]

@@ -1,5 +1,8 @@
 package com.qwen.tts.studio.engine
 
+import org.json.JSONObject
+import kotlin.random.Random
+
 class QwenEngine : AutoCloseable {
     private var nativePtr: Long = 0
 
@@ -14,7 +17,14 @@ class QwenEngine : AutoCloseable {
         val instruction: String? = null,
         val speaker: String? = null,
         val maxAudioTokens: Int = 512,
-    )
+        val temperature: Float = 0.9f,
+        val seed: Long = Random.nextLong(Long.MAX_VALUE),
+    ) {
+        init {
+            require(temperature.isFinite() && temperature in 0f..2f) { "Temperatura fuera de rango." }
+            require(seed >= 0L) { "La semilla debe ser no negativa." }
+        }
+    }
 
     class NativeResult(
         val audio: FloatArray?,
@@ -22,15 +32,21 @@ class QwenEngine : AutoCloseable {
         val success: Boolean,
         val errorMsg: String?,
         val timeMs: Long,
+        val resolvedSeed: Long,
+        val nativeTimingsJson: String?,
     ) {
-        // The pinned JNI exposes only timeMs. Missing internal metrics are not zero-duration phases.
-        val tokenizeMs: Long? = null
-        val encodeMs: Long? = null
-        val generateMs: Long? = null
-        val decodeMs: Long? = null
-        val decodeFrames: Int? = null
-        val decodeSamples: Long? = null
-        val decodeGraphComputeMs: Long? = null
+        // Native JSON contains numeric timing/counter fields only, never text or paths.
+        private val metrics = nativeTimingsJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+        private fun metric(name: String): Long? = metrics?.let {
+            if (!it.has(name) || it.isNull(name)) null else it.optLong(name, -1L).takeIf { value -> value >= 0L }
+        }
+        val tokenizeMs: Long? get() = metric("tokenizeMs")
+        val encodeMs: Long? get() = metric("encodeMs")
+        val generateMs: Long? get() = metric("generateMs")
+        val decodeMs: Long? get() = metric("decodeMs")
+        val decodeFrames: Int? get() = metric("decodeFrames")?.toInt()
+        val decodeSamples: Long? get() = metric("decodeSamples")
+        val decodeGraphComputeMs: Long? get() = metric("decodeGraphComputeMs")
     }
 
     class NativeCapabilities(

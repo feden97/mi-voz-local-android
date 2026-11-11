@@ -11,10 +11,14 @@ class QwenModelCatalogTest {
         // Mixing both codecs into one folder would silently change the Q4 workload.
         QwenModel.variants.groupBy { it.storageGroup }.values.forEach { group ->
             assertEquals(1, group.map { it.tokenizer }.distinct().size)
-            assertEquals(2, group.size)
             assertEquals(1, group.map { it.quantized }.distinct().size)
         }
-        assertEquals(2, QwenModel.variants.map { it.storageGroup }.distinct().size)
+        assertEquals(3, QwenModel.variants.map { it.storageGroup }.distinct().size)
+        val hybrid = QwenModel.variantById("1_7b_q4_bf16_codec")
+        assertEquals(QwenModel.variantById("1_7b_q4_k_m").talker, hybrid.talker)
+        assertEquals(QwenModel.variantById("1_7b_bf16").tokenizer, hybrid.tokenizer)
+        assertTrue(hybrid.storageGroup != QwenModel.variantById("1_7b_q4_k_m").storageGroup)
+        assertTrue(hybrid.storageGroup != QwenModel.variantById("1_7b_bf16").storageGroup)
     }
 
     @Test
@@ -35,5 +39,6 @@ class QwenModelCatalogTest {
         assertEquals(1_474_220_000L, QwenModel.variantById("1_7b_q4_k_m").totalBytes)
         assertEquals(2_200_696_672L, QwenModel.variantById("0_6b_bf16").totalBytes)
         assertEquals(4_235_180_000L, QwenModel.variantById("1_7b_bf16").totalBytes)
+        assertEquals(1_578_225_632L, QwenModel.variantById("1_7b_q4_bf16_codec").totalBytes)
     }
 }
