@@ -2530,9 +2530,9 @@ private fun RuntimePanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text("Esta versión usa solo CPU. GPU fue deshabilitada tras un bloqueo completo del teléfono.", style = MaterialTheme.typography.bodySmall)
-            Text("Hilos de CPU · 4 recomendados para 1.7B en este equipo", style = MaterialTheme.typography.bodySmall)
+            Text("Hilos de CPU", style = MaterialTheme.typography.bodySmall)
             Text("Más hilos no garantizan menor tiempo: compará la misma frase y controlá el calentamiento.", style = MaterialTheme.typography.bodySmall)
-            listOf(2, 4, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
+            listOf(2, 4, 5, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
               Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 options.forEach { threads ->
                     FilterChip(
