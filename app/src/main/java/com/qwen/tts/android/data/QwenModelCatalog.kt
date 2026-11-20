@@ -50,15 +50,29 @@ internal object QwenModel {
         "1883beeed99348fc35e23dd225e9082f93f6f8c109330a33d935baa8acdbfd94",
     )
 
-    val defaultVariant = ModelVariant(
+    private val tokenizerF32 = file(
+        "qwen-tokenizer-12hz-F32.gguf", 647_263_104L,
+        "b16b95557c7c7340a121757bd6855b9609e1cf4ad3fad0778b89393293ae5f3d",
+    )
+    private val compactQ4 = ModelVariant(
         id = "q4_k_m", displayName = "0.6B Base · Q4_K_M", storageGroup = "q4_k_m", quantized = true,
         talker = file("qwen-talker-0.6b-base-Q4_K_M.gguf", 628_905_056L,
             "4b468ec7b1f62b90ef4ca316c0aa57deadfd54b2cf9651703ea753cedaf04226"),
         tokenizer = tokenizerQ4,
     )
 
+    val defaultVariant = compactQ4.copy(
+        id = "0_6b_q4_f32_codec", displayName = "0.6B Base · Q4_K_M + códec F32",
+        storageGroup = "f32_codec", tokenizer = tokenizerF32,
+    )
+
     private val baseVariants = listOf(
         defaultVariant,
+        ModelVariant(
+            id = "1_7b_q8_f32_codec", displayName = "1.7B Base · Q8_0 + códec F32",
+            storageGroup = "f32_codec", quantized = true, talker = talker17Q8, tokenizer = tokenizerF32,
+        ),
+        compactQ4,
         ModelVariant(
             id = "0_6b_bf16", displayName = "0.6B Base · BF16 sin cuantizar", storageGroup = "bf16", quantized = false,
             talker = file("qwen-talker-0.6b-base-BF16.gguf", 1_841_716_288L,

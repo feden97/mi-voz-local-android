@@ -1535,12 +1535,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun preferredCpuThreadCount(): Int {
-        val available = Runtime.getRuntime().availableProcessors()
-        return when {
-            available >= 8 -> 4
-            available >= 4 -> 4
-            else -> available.coerceAtLeast(1)
-        }
+        return Runtime.getRuntime().availableProcessors().coerceIn(1, 5)
     }
 
     private fun selectedCpuThreadCount(): Int =
