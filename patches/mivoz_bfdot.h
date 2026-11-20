@@ -7,6 +7,9 @@
 #ifdef MIVOZ_BFDOT_APP
 #include <atomic>
 
+extern "C" __attribute__((visibility("default"))) bool mivoz_configure_bfdot(bool requested);
+extern "C" __attribute__((visibility("default"))) bool mivoz_take_bfdot_used();
+
 static std::atomic<bool> mivoz_bfdot_enabled{false};
 static std::atomic<bool> mivoz_bfdot_used{false};
 #endif
@@ -70,14 +73,14 @@ static inline bool mivoz_bench_vec_dot(int n, float * result, const void * x, co
 }
 
 #ifdef MIVOZ_BFDOT_APP
-extern "C" __attribute__((visibility("default"))) bool mivoz_configure_bfdot(bool requested) {
+bool mivoz_configure_bfdot(bool requested) {
     const bool enabled = requested && mivoz_bench_has_bfdot();
     mivoz_bfdot_used.store(false, std::memory_order_relaxed);
     mivoz_bfdot_enabled.store(enabled, std::memory_order_relaxed);
     return enabled;
 }
 
-extern "C" __attribute__((visibility("default"))) bool mivoz_take_bfdot_used() {
+bool mivoz_take_bfdot_used() {
     return mivoz_bfdot_used.exchange(false, std::memory_order_relaxed);
 }
 #endif

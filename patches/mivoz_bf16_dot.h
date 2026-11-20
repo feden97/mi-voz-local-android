@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MIVOZ_BF16_DOT_H
+#define MIVOZ_BF16_DOT_H
 
 #include <cstdint>
 #include <cstring>
@@ -56,3 +57,4 @@ static inline bool mivoz_vec_dot_bf16_neon(int n, float * result,
     return true;
 }
 #endif
+#endif // MIVOZ_BF16_DOT_H
