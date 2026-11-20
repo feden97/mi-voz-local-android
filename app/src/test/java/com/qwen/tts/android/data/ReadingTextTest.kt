@@ -21,6 +21,19 @@ class ReadingTextTest {
         assertEquals("Abrí USB.txt y copiá `DNI`.", ReadingText.prepareSpanish("Abrí USB.txt y copiá `DNI`."))
     }
 
+    @Test fun addsOpeningMarksToStandaloneSpanishQuestionsAndExclamations() {
+        val expected = "¿Venís mañana?\n¡Muchas gracias!"
+        assertEquals(expected, ReadingText.prepareSpanish("Venís mañana?\nMuchas gracias!"))
+        assertEquals(expected, ReadingText.prepareSpanish(expected))
+        val complex = "Hola, venís mañana?\nLeé el mensaje en https://ejemplo.com/ahora?"
+        assertEquals(complex, ReadingText.prepareSpanish(complex))
+    }
+
+    @Test fun returnsAlreadyPreparedProseUnchanged() {
+        val text = "Hola, esta es una prueba de mi voz generada de forma local en el teléfono."
+        assertEquals(text, ReadingText.prepareSpanish(text))
+    }
+
     @Test fun proposesOneSentenceOrAShortPrefixWithoutBreakingWords() {
         assertEquals("¿Venís mañana?", ReadingText.firstPhrase("\n  ¿Venís mañana? Te espero.\nDespués hablamos.", true))
         val word = "🙂saludo"

@@ -17,6 +17,7 @@ internal object ReadingText {
     private val acronym = Regex("(?<![\\p{L}\\p{N}_./@%+=#-])(?:DNI|PDF|USB)(?![\\p{L}\\p{N}_/@%+=#-]|\\.[\\p{L}\\p{N}])")
     private val acronyms = mapOf("DNI" to "de ene i", "PDF" to "pe de efe", "USB" to "u ese be")
     private val protected = Regex("(?i)(?:https?://|www\\.)\\S+|[\\p{L}\\p{N}._%+\\-]+@[\\p{L}\\p{N}.\\-]+|`[^`\\n]+`")
+    private val plainQuestionOrExclamation = Regex("^[\\p{L}][\\p{L}\\p{M}\\p{N}\\p{Zs}’'\\-]*[?!]$")
     private val word = Regex("\\p{L}+")
     private val numbers = listOf(
         "cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez",
@@ -29,7 +30,13 @@ internal object ReadingText {
     fun prepareSpanish(text: String): String = text.replace("\r\n", "\n").replace('\r', '\n')
         .trim().split(paragraphBreak)
         .joinToString("\n\n") { paragraph ->
-            val lines = paragraph.lines().map { prepareLine(it.trim()) }
+            val lines = paragraph.lines().map { line ->
+                val prepared = prepareLine(line.trim())
+                if (plainQuestionOrExclamation.matches(prepared)) {
+                    val opening = if (prepared.endsWith('?')) '¿' else '¡'
+                    opening + prepared
+                } else prepared
+            }
             val last = lines.last()
             val endsWithProtectedText = protected.findAll(last).lastOrNull()?.range?.last == last.lastIndex
             val addPeriod = last.lastOrNull()?.isLetterOrDigit() == true && !endsWithProtectedText &&

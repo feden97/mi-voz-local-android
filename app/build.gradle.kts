@@ -49,8 +49,8 @@ android {
         applicationId = "ar.com.mivozlocal.android"
         minSdk = 31
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.3.12"
+        versionCode = 16
+        versionName = "0.3.13"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

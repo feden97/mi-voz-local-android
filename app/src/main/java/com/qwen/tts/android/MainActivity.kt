@@ -1968,7 +1968,7 @@ private fun StudioScreen(viewModel: MainViewModel) {
     val voices by viewModel.voices.collectAsState()
     val transcripts by viewModel.voiceTranscripts.collectAsState()
     var showVoicePicker by remember { mutableStateOf(false) }
-    var readingDraft by rememberSaveable { mutableStateOf<String?>(null) }
+    var showReadingEditor by rememberSaveable { mutableStateOf(false) }
     var previewDraft by rememberSaveable { mutableStateOf<String?>(null) }
     var reportToExport by remember { mutableStateOf<String?>(null) }
     val jsonLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -2005,14 +2005,12 @@ private fun StudioScreen(viewModel: MainViewModel) {
         state.useIcl && hasTranscript -> "Audio y transcripción"
         else -> "Solo timbre"
     }
-    readingDraft?.let { draft ->
+    if (showReadingEditor) {
         ReadingTextDialog(
             original = state.text,
-            draft = draft,
             spanishScript = spanishScript,
-            onChange = { readingDraft = it },
-            onDismiss = { readingDraft = null },
-            onApply = { viewModel.useReadingText(draft); readingDraft = null },
+            onDismiss = { showReadingEditor = false },
+            onApply = { draft -> viewModel.useReadingText(draft); showReadingEditor = false },
         )
     }
     previewDraft?.let { draft ->
@@ -2049,7 +2047,7 @@ private fun StudioScreen(viewModel: MainViewModel) {
                 onTextChange = viewModel::updateText,
                 onPrepareText = {
                     focusManager.clearFocus()
-                    readingDraft = if (spanishScript) ReadingText.prepareSpanish(state.text) else state.text
+                    showReadingEditor = true
                 },
                 onPreview = {
                     val selection = state.editor.selection
@@ -2140,26 +2138,39 @@ private fun StudioScreen(viewModel: MainViewModel) {
 @Composable
 private fun ReadingTextDialog(
     original: String,
-    draft: String,
     spanishScript: Boolean,
-    onChange: (String) -> Unit,
     onDismiss: () -> Unit,
-    onApply: () -> Unit,
+    onApply: (String) -> Unit,
 ) {
+    val suggested = remember(original, spanishScript) {
+        if (spanishScript) ReadingText.prepareSpanish(original) else original
+    }
+    var draft by rememberSaveable(original, spanishScript) { mutableStateOf(suggested) }
+    val hasSuggestion = suggested != original
     val tooLong = remember(draft) { TextChunks.count(draft) > TextChunks.MAX_CHARACTERS }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Preparar para leer") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(if (spanishScript) "Revisá la puntuación, las horas y las siglas. Separá con un punto las ideas que quieras escuchar con una pausa."
-                    else "Editá el texto que leerá la voz. Podés agregar puntuación y escribir las palabras como querés que suenen.")
+                Text(
+                    when {
+                        !spanishScript -> "Las sugerencias automáticas están disponibles para guiones en español."
+                        hasSuggestion -> "Hay ajustes sugeridos para este texto. Revisalos antes de aplicar."
+                        else -> "Sin sugerencias automáticas para este texto."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
                 OutlinedTextField(
-                    value = draft, onValueChange = onChange, modifier = Modifier.fillMaxWidth(), minLines = 4, maxLines = 8,
+                    value = draft, onValueChange = { draft = it }, modifier = Modifier.fillMaxWidth(), minLines = 4, maxLines = 8,
                     label = { Text("Texto de lectura") }, isError = tooLong,
                     supportingText = if (tooLong) ({ Text("Máximo de 20.000 caracteres") }) else null,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 )
+                if (!hasSuggestion) {
+                    Text("Si la voz se apura, probá separar las ideas con un punto y escuchá el tramo con «Probar una frase».",
+                        style = MaterialTheme.typography.bodySmall)
+                }
                 if (draft != original) {
                     StudioDisclosure("Ver texto anterior") {
                         Text(original, style = MaterialTheme.typography.bodyMedium,
@@ -2170,7 +2181,7 @@ private fun ReadingTextDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
         confirmButton = {
-            TextButton(onClick = onApply, enabled = draft.isNotBlank() && draft != original && !tooLong) {
+            TextButton(onClick = { onApply(draft) }, enabled = draft.isNotBlank() && draft != original && !tooLong) {
                 Text("Usar este texto")
             }
         },
