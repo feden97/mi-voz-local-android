@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [VoiceProfileEntity::class, GenerationEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class QwenDatabase : RoomDatabase() {
@@ -37,6 +37,13 @@ abstract class QwenDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE generations ADD COLUMN languageId INTEGER")
+                db.execSQL("ALTER TABLE generations ADD COLUMN editLabel TEXT")
+            }
+        }
+
         @Volatile
         private var INSTANCE: QwenDatabase? = null
 
@@ -47,7 +54,7 @@ abstract class QwenDatabase : RoomDatabase() {
                     QwenDatabase::class.java,
                     "qwen_tts_database",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                 INSTANCE = instance
                 instance

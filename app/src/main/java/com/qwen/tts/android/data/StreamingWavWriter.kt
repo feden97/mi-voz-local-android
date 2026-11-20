@@ -41,6 +41,22 @@ internal class StreamingWavWriter(val file: File, val sampleRate: Int = 24_000) 
         }
     }
 
+    fun appendPcm16(source: RandomAccessFile, byteOffset: Long, frames: Long) {
+        require(!closed && byteOffset >= 0 && frames >= 0)
+        require(frames <= (0xffff_ffffL - 36) / 2 - sampleCount) { "El WAV supera el tamaño del formato RIFF." }
+        if (frames == 0L) return
+        val block = ByteArray(16_384)
+        source.seek(byteOffset)
+        var bytesLeft = frames * 2
+        while (bytesLeft > 0) {
+            val size = minOf(bytesLeft, block.size.toLong()).toInt()
+            source.readFully(block, 0, size)
+            output.write(block, 0, size)
+            bytesLeft -= size
+            sampleCount += size / 2
+        }
+    }
+
     private fun writeSilence(samples: Long) {
         var remaining = samples * 2
         val zero = ByteArray(8192)

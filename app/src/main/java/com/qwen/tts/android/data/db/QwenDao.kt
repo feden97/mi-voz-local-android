@@ -11,6 +11,9 @@ interface QwenDao {
     @Query("SELECT * FROM voice_profiles ORDER BY createdAt DESC")
     fun observeVoices(): Flow<List<VoiceProfileEntity>>
 
+    @Query("SELECT * FROM voice_profiles WHERE voiceId = :voiceId")
+    suspend fun getVoice(voiceId: String): VoiceProfileEntity?
+
     @Insert
     suspend fun insertVoice(voice: VoiceProfileEntity)
 

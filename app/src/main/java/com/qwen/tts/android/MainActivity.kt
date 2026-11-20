@@ -118,10 +118,12 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.qwen.tts.android.data.VoiceRecorder
 import com.qwen.tts.android.data.AudioImporter
 import com.qwen.tts.android.data.RecordingResult
@@ -129,6 +131,9 @@ import com.qwen.tts.android.data.ModelFile
 import com.qwen.tts.android.data.ModelVariant
 import com.qwen.tts.android.data.QwenModel
 import com.qwen.tts.android.data.VoicePromptFiles
+import com.qwen.tts.android.data.EditableWave
+import com.qwen.tts.android.data.WaveEdit
+import com.qwen.tts.android.data.WaveRange
 import com.qwen.tts.android.data.GenerationEstimate
 import com.qwen.tts.android.data.TextChunks
 import com.qwen.tts.android.data.StreamingWavWriter
@@ -168,6 +173,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 private data class LanguageOption(val label: String, val id: Int)
 private data class BackendOption(val id: String, val label: String, val preference: Int)
@@ -223,7 +229,6 @@ data class QwenTtsUiState(
     val sampleCount: Int = 0,
     val synthesisMillis: Long = 0,
     val playing: Boolean = false,
-    val playingGenerationId: Long? = null,
     val operationElapsedMillis: Long = 0,
     val synthesisFrames: Int = 0,
     val maxAudioTokens: Int = 512,
@@ -249,10 +254,12 @@ data class QwenTtsUiState(
     val etaObservedAtMillis: Long = 0,
     val generationPhase: String = "",
     val resultModelName: String? = null,
+    val resultGenerationId: Long? = null,
     val resultText: String = "",
     val resultReadingText: String? = null,
     val previewInProgress: Boolean = false,
     val previewText: String? = null,
+    val previewSourceId: Long? = null,
     val previewPlaying: Boolean = false,
     val previewMessage: String? = null,
     val resultBackend: String? = null,
@@ -304,6 +311,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val recorderState = recorder.state
     private val _voiceTranscripts = MutableStateFlow<Map<String, String>>(emptyMap())
     val voiceTranscripts = _voiceTranscripts.asStateFlow()
+    private val _audioEditSave = MutableStateFlow<AudioEditSave?>(null)
+    internal val audioEditSave = _audioEditSave.asStateFlow()
 
     private val _uiState = MutableStateFlow(
         QwenTtsUiState(
@@ -326,8 +335,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var backgroundFailure: String? = null
     private val nativeLock = Any()
     private val cleared = AtomicBoolean(false)
-    private var generatedFile: File? = null
-    private var playJob: Job? = null
+    private var unsavedGeneration: GenerationEntity? = null
     private var transcriptionJob: Job? = null
     private var operationTickerJob: Job? = null
     private var activePlayer: MediaPlayer? = null
@@ -710,9 +718,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         startBusy(status = "Preparando generación por fragmentos", resetSynthesis = true)
         val background = _uiState.value.backgroundGenerationEnabled
         val bfdotRequested = _uiState.value.experimentalBfdot
+        unsavedGeneration = null
         _uiState.update { it.copy(plannedChunks = chunks.size, currentChunk = 0, resultModelName = variant.displayName,
             resultBackend = null, resultThreads = threads, resultMode = null, resultReportPath = null, resultStatus = null,
-            resultText = originalText, resultReadingText = readingText) }
+            resultText = originalText, resultReadingText = readingText, resultGenerationId = null) }
         if (background && !GenerationForegroundService.begin(getApplication())) {
             stopBusyTicker()
             _uiState.update { it.copy(busy = false, canCancel = false, status = "No se pudo iniciar el servicio; desactivá segundo plano para generar en pantalla.") }
@@ -729,6 +738,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var mode = "default"
             var reportFile: File? = null
             var saved: GenerationEntity? = null
+            var unsaved: GenerationEntity? = null
             var status = "failed"
             var diagnostics: GenerationDiagnostics? = null
             generationDir.mkdirs()
@@ -853,65 +863,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             sampleRate = 24_000, sampleCount = Math.toIntExact(sampleCount), synthesisMillis = nativeMillis,
                             modelId = variant.id, modelName = variant.displayName, backend = backend, cpuThreads = threads,
                             cloningMode = mode, reportPath = reportFile?.absolutePath, totalMillis = SystemClock.elapsedRealtime() - started,
-                            chunkCount = chunks.size, completedChunks = completed, status = status)
+                            chunkCount = chunks.size, completedChunks = completed, status = status, languageId = language)
                         runCatching { dao.insertGeneration(entity) }.onSuccess { id -> saved = entity.copy(generationId = id) }
-                            .onFailure { problem = it }
+                            .onFailure { problem = it; unsaved = entity }
                     } else outputFile.delete()
                 }
             }
             stopBusyTicker()
             reportFile?.let { preferences.edit().putString("last-report", it.absolutePath).apply() }
-            generatedFile = if (completed > 0 && outputFile.isFile) outputFile else null
+            unsavedGeneration = unsaved
+            val audio = (saved ?: unsaved)?.takeIf { outputFile.isFile }
             val complete = status == "completed"
             _uiState.update { it.copy(busy = false, loaded = false, canCancel = false, cancelling = false,
                 status = when { complete && saved != null -> "Audio completo y guardado; memoria del modelo liberada"
+                    complete && audio != null -> "Audio listo; no se pudo agregar al historial"
                     completed > 0 -> "Audio parcial conservado ($completed/${chunks.size} fragmentos); memoria liberada"
                     status == "cancelled" -> "Generación cancelada; registro disponible"
                     else -> "Falló la generación; registro disponible si pudo guardarse" },
                 error = backgroundFailure ?: if (problem != null && problem !is CancellationException && !cancelRequested.get()) problem?.message else null,
-                sampleCount = if (generatedFile != null) Math.toIntExact(sampleCount) else 0, sampleRate = 24_000,
+                sampleCount = audio?.sampleCount ?: 0, sampleRate = 24_000,
                 synthesisMillis = nativeMillis, generationPhase = "", etaLowMillis = null, etaHighMillis = null,
                 resultModelName = variant.displayName, resultBackend = backend, resultThreads = threads, resultMode = mode,
                 resultStatus = status, resultReportPath = reportFile?.absolutePath, resultTotalMillis = SystemClock.elapsedRealtime() - started,
                 resultChunks = completed, plannedChunks = chunks.size, currentChunk = completed, resultText = originalText,
-                resultReadingText = readingText,
-                playingGenerationId = null) }
+                resultReadingText = readingText, resultGenerationId = audio?.generationId) }
             GenerationForegroundService.stop(getApplication())
-            if (complete && generatedFile != null && GenerationRuntime.isUiVisible) playAudio()
         }
     }
 
-    fun synthesizePreview(value: String) {
+    internal fun synthesizePreview(value: String, source: AudioEditorDocument? = null) {
         val text = value.trim()
         val current = _uiState.value
-        if (current.busy || !current.modelReady || recorderState.value.isRecording || text.isEmpty() ||
+        if (current.busy || recorderState.value.isRecording || text.isEmpty() ||
             TextChunks.count(text) > ReadingText.PREVIEW_CHARACTERS) return
-        val variant = selectedVariant()
-        val selectedVoice = current.selectedVoiceId?.let { id -> voices.value.firstOrNull { it.voiceId == id } }
-        if (current.selectedVoiceId != null && selectedVoice == null) {
-            _uiState.update { it.copy(previewMessage = "Seleccioná una voz disponible antes de probar.") }
+        clearPreview()
+        val recordedModelId = source?.generation?.modelId
+        val variant = if (recordedModelId == null) selectedVariant() else QwenModel.variants.firstOrNull { it.id == recordedModelId }
+        if (variant == null || !isModelReady(variant)) {
+            val model = variant?.displayName ?: source?.generation?.modelName ?: "el modelo de esta grabación"
+            _uiState.update { it.copy(previewMessage = "Prepará $model en Ajustes antes de generar.") }
             return
         }
         val sampling = runCatching { resolveSampling() }.getOrElse { error ->
             _uiState.update { it.copy(previewMessage = error.message) }
             return
         }
-        clearPreview()
         stopAudio()
         startBusy("Preparando la prueba", preview = true)
         viewModelScope.launch {
             var resultAvailable = false
+            var takeComplete = true
             var message: String? = null
             try {
                 withContext(Dispatchers.IO) {
+                    val voiceId = if (source == null) current.selectedVoiceId else source.generation.voiceId
+                    val selectedVoice = voiceId?.let { dao.getVoice(it) ?: error("La voz de este audio no está disponible.") }
+                    val originalMode = source?.generation?.cloningMode
+                    val useIcl = if (originalMode == null) current.useIcl else originalMode == "icl"
+                    val transcript = synthesisTranscript(selectedVoice, useIcl)
+                    check(originalMode != "icl" || transcript.isNotBlank()) { "La voz necesita su transcripción para generar otra toma." }
+                    if (variant.id != current.selectedModelId) synchronized(nativeLock) {
+                        engine?.close()
+                        engine = null
+                        _uiState.update { it.copy(loaded = false, activeBackendName = null) }
+                    }
                     withSynthesisEngine { native ->
-                        val transcript = synthesisTranscript(selectedVoice, current.useIcl)
                         val voice = prepareSynthesisVoice(native, variant, selectedVoice, transcript)
                         native.configureBfdot(current.experimentalBfdot)
-                        val params = QwenEngine.NativeParams(languageId = current.selectedLanguageId,
+                        val params = QwenEngine.NativeParams(languageId = source?.languageId ?: current.selectedLanguageId,
                             temperature = sampling.temperature, seed = sampling.seed.toLong())
                         _uiState.update { it.copy(generationPhase = "Generando la prueba") }
-                        native.setProgressCallback { _, maxTokens ->
+                        var framesSeen = 0
+                        native.setProgressCallback { frames, maxTokens ->
+                            framesSeen = maxOf(frames, framesSeen)
                             if (maxTokens == -1) _uiState.update { it.copy(generationPhase = "Decodificando la prueba") }
                         }
                         throwIfCancelRequested(native)
@@ -920,7 +944,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val audio = result.audio
                         check(result.success && audio != null && audio.isNotEmpty()) { result.errorMsg ?: "El motor no produjo audio." }
                         StreamingWavWriter(previewFile).use { it.append(audio, result.sampleRate) }
-                        if (audio.size >= params.maxAudioTokens * 1920) message = "La prueba llegó al límite de audio. Probá con un tramo más corto."
+                        takeComplete = framesSeen < params.maxAudioTokens && audio.size < params.maxAudioTokens * 1920
+                        if (!takeComplete) message = "La prueba llegó al límite de audio. Probá con un tramo más corto."
                     }
                 }
                 resultAvailable = !cancelRequested.get()
@@ -934,22 +959,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val cancelled = cancelRequested.get()
                 _uiState.update { it.copy(busy = false, canCancel = false, cancelling = false,
                     generationPhase = "", previewInProgress = false, previewText = text.takeIf { resultAvailable },
+                    previewSourceId = source?.generation?.generationId?.takeIf { resultAvailable && takeComplete },
                     status = if (it.modelReady) "Modelo listo" else "Modelo sin descargar",
                     previewMessage = if (cancelled) "Prueba cancelada." else message) }
             }
-            if (resultAvailable && GenerationRuntime.isUiVisible) playPreview()
+            if (source == null && resultAvailable && GenerationRuntime.isUiVisible) playPreview()
         }
     }
 
     fun playPreview() {
-        if (!_uiState.value.busy && _uiState.value.previewText != null) playFile(previewFile, preview = true)
+        if (!_uiState.value.busy && _uiState.value.previewText != null) playPreviewFile()
     }
 
     fun clearPreview() {
         if (_uiState.value.previewInProgress) return
         if (activePlayerIsPreview) stopAudio()
         if (_uiState.value.previewText != null) previewFile.delete()
-        _uiState.update { it.copy(previewText = null, previewMessage = null) }
+        _uiState.update { it.copy(previewText = null, previewSourceId = null, previewMessage = null) }
     }
 
     private fun resolveSampling(): ResolvedGenerationSampling {
@@ -971,14 +997,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             native.requestCancel()
             throw CancellationException("Generación cancelada")
         }
-    }
-
-    private fun finishCancelled() {
-        stopBusyTicker()
-        generatedFile = null
-        _uiState.update { it.copy(busy = false, canCancel = false, cancelling = false,
-            status = "Generación cancelada; no se guardó audio incompleto", error = null,
-            sampleCount = 0, etaLowMillis = null, etaHighMillis = null, generationPhase = "") }
     }
 
     fun startVoiceRecording() {
@@ -1159,10 +1177,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             files.forEach { PrivateFiles.child(generationDir, it) }
                             files.forEach { PrivateFiles.deleteFile(generationDir, it) }
                             dao.deleteGeneration(generation)
-                            if (generatedFile?.absolutePath == generation.wavPath) {
-                                generatedFile = null
+                            if (_uiState.value.resultGenerationId == generation.generationId) {
                                 _uiState.update { it.copy(sampleCount = 0, sampleRate = 0, resultReportPath = null,
-                                    savedFileName = null, resultStatus = null, resultText = "", resultReadingText = null) }
+                                    savedFileName = null, resultStatus = null, resultText = "", resultReadingText = null,
+                                    resultGenerationId = null) }
                             }
                         }
                     }
@@ -1179,21 +1197,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun playGeneration(generationId: Long) {
-        if (_uiState.value.playing && _uiState.value.playingGenerationId == generationId) { stopAudio(); return }
-        viewModelScope.launch {
-            val generation = withContext(Dispatchers.IO) { dao.getGeneration(generationId) } ?: return@launch
-            generatedFile = File(generation.wavPath)
-            _uiState.update { it.copy(sampleRate = generation.sampleRate, sampleCount = generation.sampleCount,
-                synthesisMillis = generation.synthesisMillis, resultModelName = generation.modelName,
-                resultBackend = generation.backend, resultThreads = generation.cpuThreads, resultMode = generation.cloningMode,
-                resultStatus = generation.status, resultReportPath = generation.reportPath, resultText = generation.text,
-                resultReadingText = generation.readingText,
-                resultTotalMillis = generation.totalMillis ?: generation.synthesisMillis,
-                resultChunks = generation.completedChunks ?: 0, plannedChunks = generation.chunkCount ?: 0,
-                status = "Audio del historial", error = null) }
-            playAudio(generationId)
+    internal suspend fun loadAudioEditor(id: Long): AudioEditorDocument {
+        val liveResult = unsavedGeneration.takeIf { id == 0L }
+        return withContext(Dispatchers.IO) {
+            val generation = liveResult ?: dao.getGeneration(id) ?: error("No se encontró el audio.")
+            val file = PrivateFiles.child(generationDir, File(generation.wavPath))
+            check(file.isFile) { "El archivo de audio ya no está disponible." }
+            val layout = EditableWave.inspect(file)
+            val languageId = generation.languageId ?: generation.reportPath?.let { path ->
+                runCatching {
+                    val report = PrivateFiles.child(generationDir, File(path))
+                    JSONObject(report.readText()).optJSONObject("parameters")?.optInt("languageId")
+                        ?.takeIf { id -> languageOptions.any { it.id == id } }
+                }.getOrNull()
+            }
+            AudioEditorDocument(generation, file, layout, EditableWave.peaks(file, layout), languageId)
         }
+    }
+
+    internal fun saveAudioEdit(source: AudioEditorDocument, range: WaveRange, edit: WaveEdit, takeText: String? = null) {
+        val current = _uiState.value
+        if (current.busy) return
+        val sourceId = source.generation.generationId
+        val takesAudio = edit == WaveEdit.REPLACE || edit == WaveEdit.INSERT
+        if (takesAudio && (current.previewSourceId != sourceId || current.previewText != takeText?.trim())) {
+            _audioEditSave.value = AudioEditSave(sourceId, error = "Generá una toma de ese texto antes de guardar.")
+            return
+        }
+        val label = when (edit) {
+            WaveEdit.KEEP -> "Recorte"
+            WaveEdit.REMOVE -> "Tramo eliminado"
+            WaveEdit.REPLACE -> "Tramo reemplazado"
+            WaveEdit.INSERT -> "Toma insertada"
+        }
+        stopAudio()
+        _audioEditSave.value = AudioEditSave(sourceId, saving = true)
+        startBusy("Guardando copia editada")
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val output = File(generationDir, "edit-${UUID.randomUUID()}.wav")
+                    val layout = EditableWave.saveCopy(source.file, output, range, edit, previewFile.takeIf { takesAudio })
+                    try {
+                        dao.insertGeneration(source.generation.copy(
+                            generationId = 0, wavPath = output.absolutePath, sampleRate = layout.sampleRate,
+                            sampleCount = Math.toIntExact(layout.frames), synthesisMillis = 0L,
+                            createdAt = System.currentTimeMillis(), reportPath = null, totalMillis = null,
+                            chunkCount = null, completedChunks = null, status = "edited",
+                            languageId = source.languageId, editLabel = label,
+                        ))
+                    } catch (error: Throwable) {
+                        output.delete()
+                        throw error
+                    }
+                }
+            }
+            stopBusyTicker()
+            _uiState.update { it.copy(busy = false, status = if (result.isSuccess) "Copia guardada" else "Falló el guardado") }
+            _audioEditSave.value = AudioEditSave(sourceId, savedId = result.getOrNull(),
+                error = result.exceptionOrNull()?.let { it.message ?: "No se pudo guardar la copia." })
+            if (result.isSuccess) clearPreview()
+        }
+    }
+
+    internal fun clearAudioEditSave() {
+        if (_audioEditSave.value?.saving != true) _audioEditSave.value = null
     }
 
     fun deleteGeneration(generation: GenerationEntity) {
@@ -1201,47 +1269,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(pendingDeletion = PendingDeletion.Generation(generation)) }
     }
 
-    fun playAudio(historyGenerationId: Long? = null) {
-        val file = generatedFile ?: return
-        playFile(file, historyGenerationId)
-    }
-
-    private fun playFile(file: File, historyGenerationId: Long? = null, preview: Boolean = false) {
+    private fun playPreviewFile() {
         stopAudio()
         val player = MediaPlayer()
         activePlayer = player
-        activePlayerIsPreview = preview
+        activePlayerIsPreview = true
         try {
             player.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-            player.setDataSource(file.absolutePath)
+            player.setDataSource(previewFile.absolutePath)
             player.setOnPreparedListener { current ->
                 if (activePlayer === current) {
                     current.start()
-                    _uiState.update { it.copy(playing = !preview, playingGenerationId = historyGenerationId, previewPlaying = preview) }
+                    _uiState.update { it.copy(previewPlaying = true) }
                 }
             }
             player.setOnCompletionListener { current -> if (activePlayer === current) stopAudio() }
             player.setOnErrorListener { current, _, _ ->
-                if (activePlayer === current) reportPlaybackError("No se pudo reproducir el archivo.", preview)
+                if (activePlayer === current) reportPreviewError("No se pudo reproducir la prueba.")
                 true
             }
             player.prepareAsync()
         } catch (error: Exception) {
-            reportPlaybackError(error.message ?: "No se pudo abrir el audio", preview)
+            reportPreviewError(error.message ?: "No se pudo abrir el audio.")
         }
     }
 
-    private fun reportPlaybackError(message: String, preview: Boolean) {
+    private fun reportPreviewError(message: String) {
         stopAudio()
-        _uiState.update { if (preview) it.copy(previewMessage = message) else it.copy(error = message) }
+        _uiState.update { it.copy(previewMessage = message) }
     }
 
     fun stopAudio() {
-        playJob?.cancel(); playJob = null
         activePlayer?.let { player -> runCatching { player.setOnPreparedListener(null); player.setOnCompletionListener(null); player.setOnErrorListener(null); player.release() } }
         activePlayer = null
         activePlayerIsPreview = false
-        _uiState.update { it.copy(playing = false, playingGenerationId = null, previewPlaying = false) }
+        _uiState.update { it.copy(playing = false, previewPlaying = false) }
     }
 
     fun releaseMemory() {
@@ -1747,12 +1809,16 @@ private val appDestinations = listOf(
     AppDestination.Settings,
 )
 
+private const val AUDIO_EDITOR_ROUTE = "audio/{generationId}"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalContext.current)) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route ?: AppDestination.Studio.route
+    val editingAudio = currentRoute == AUDIO_EDITOR_ROUTE
+    val openEditor: (Long) -> Unit = { id -> navController.navigate("audio/$id") { launchSingleTop = true } }
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -1783,7 +1849,7 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            if (!keyboardOpen) {
+            if (!keyboardOpen && !editingAudio) {
                 TopAppBar(
                     title = {
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1799,7 +1865,7 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
             }
         },
         bottomBar = {
-            if (!keyboardOpen) NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+            if (!keyboardOpen && !editingAudio) NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 appDestinations.forEach { destination ->
                     NavigationBarItem(
                         selected = currentRoute == destination.route,
@@ -1849,16 +1915,22 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
             },
         ) {
             composable(AppDestination.Studio.route) {
-                StudioScreen(viewModel)
+                StudioScreen(viewModel, openEditor)
             }
             composable(AppDestination.Voices.route) {
                 VoicesScreen(viewModel)
             }
             composable(AppDestination.History.route) {
-                HistoryScreen(viewModel, onReuse = { navController.navigate(AppDestination.Studio.route) { launchSingleTop = true } })
+                HistoryScreen(viewModel, openEditor, onReuse = { navController.navigate(AppDestination.Studio.route) { launchSingleTop = true } })
             }
             composable(AppDestination.Settings.route) {
                 SettingsScreen(viewModel)
+            }
+            composable(AUDIO_EDITOR_ROUTE, arguments = listOf(navArgument("generationId") { type = NavType.LongType })) { entry ->
+                val id = requireNotNull(entry.arguments).getLong("generationId")
+                AudioEditorScreen(viewModel, id, onClose = { navController.popBackStack() }, onOpenCopy = { copyId ->
+                    navController.navigate("audio/$copyId") { popUpTo(AUDIO_EDITOR_ROUTE) { inclusive = true } }
+                })
             }
         }
     }
@@ -1957,7 +2029,7 @@ private fun VoiceTranscriptEditor(viewModel: MainViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StudioScreen(viewModel: MainViewModel) {
+private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) {
     val state by viewModel.uiState.collectAsState()
     val studioContext = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -2063,8 +2135,7 @@ private fun StudioScreen(viewModel: MainViewModel) {
             if (!state.busy && (state.sampleCount > 0 || state.resultReportPath != null)) {
                 ResultPanel(
                     state = state,
-                    onPlay = viewModel::playAudio,
-                    onStop = viewModel::stopAudio,
+                    onEditAudio = { state.resultGenerationId?.let(onEditAudio) },
                     onJson = { reportToExport = state.resultReportPath; jsonLauncher.launch("mi-voz-registro.json") },
                     onText = { reportToExport = state.resultReportPath; textLauncher.launch("mi-voz-registro.txt") },
                     onCopy = { viewModel.copyText(state.resultText) },
@@ -2419,7 +2490,7 @@ private fun VoicesScreen(viewModel: MainViewModel) {
 }
 
 @Composable
-private fun HistoryScreen(viewModel: MainViewModel, onReuse: () -> Unit) {
+private fun HistoryScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit, onReuse: () -> Unit) {
     val state by viewModel.uiState.collectAsState()
     val generations by viewModel.generations.collectAsState()
     var pendingExport by remember { mutableStateOf<GenerationEntity?>(null) }
@@ -2453,7 +2524,6 @@ private fun HistoryScreen(viewModel: MainViewModel, onReuse: () -> Unit) {
             }
         }
         items(generations, key = { it.generationId }) { generation ->
-            val isPlayingThis = state.playing && state.playingGenerationId == generation.generationId
             var menuExpanded by remember(generation.generationId) { mutableStateOf(false) }
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Row(
@@ -2464,7 +2534,7 @@ private fun HistoryScreen(viewModel: MainViewModel, onReuse: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(generation.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(generation.editLabel ?: generation.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Text(generation.modelName ?: "Modelo no registrado (audio anterior)", style = MaterialTheme.typography.labelMedium)
                         Text("${generation.backend ?: "Motor no registrado"} · ${generation.cpuThreads?.let { "$it hilos" } ?: "Hilos no registrados"} · ${modeLabel(generation.cloningMode)}", style = MaterialTheme.typography.bodySmall)
                         if (generation.status in listOf("partial", "truncated")) Text("Audio parcial · ${generation.completedChunks}/${generation.chunkCount} fragmentos", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -2476,28 +2546,22 @@ private fun HistoryScreen(viewModel: MainViewModel, onReuse: () -> Unit) {
                         )
                     }
                     Button(
-                        onClick = {
-                            if (isPlayingThis) {
-                                viewModel.stopAudio()
-                            } else {
-                                viewModel.playGeneration(generation.generationId)
-                            }
-                        },
+                        onClick = { onEditAudio(generation.generationId) },
                     ) {
                         Icon(
-                            if (isPlayingThis) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            Icons.Default.PlayArrow,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(if (isPlayingThis) "Detener" else "Reproducir")
+                        Text("Abrir")
                     }
                     Box {
                         IconButton(onClick = { menuExpanded = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = "Más")
                         }
                         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                            DropdownMenuItem(text = { Text("Copiar texto original") },
+                            DropdownMenuItem(text = { Text(if (generation.editLabel == null) "Copiar texto original" else "Copiar texto de origen") },
                                 onClick = { menuExpanded = false; viewModel.copyText(generation.text) })
                             generation.readingText?.let { readingText ->
                                 DropdownMenuItem(text = { Text("Copiar texto de lectura") },
@@ -2969,7 +3033,7 @@ private fun RuntimePanel(
 }
 
 @Composable
-private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () -> Unit, onJson: () -> Unit,
+private fun ResultPanel(state: QwenTtsUiState, onEditAudio: () -> Unit, onJson: () -> Unit,
     onText: () -> Unit, onCopy: () -> Unit, onCopyReadingText: () -> Unit) {
     val partial = state.resultStatus in listOf("partial", "truncated")
     val hasAudio = state.sampleCount > 0 && state.sampleRate > 0
@@ -2985,10 +3049,11 @@ private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () ->
             duration?.let { seconds ->
                 Text("${formatSeconds(seconds)} de audio · ${formatDuration(state.resultTotalMillis)} de generación",
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedButton(onClick = { if (state.playing) onStop() else onPlay() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Icon(if (state.playing) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null)
+                OutlinedButton(onClick = onEditAudio, enabled = state.resultGenerationId != null,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text(if (state.playing) "Detener" else "Reproducir")
+                    Text("Reproducir y editar")
                 }
             }
             StudioDisclosure("Detalles y registros") {
@@ -3010,7 +3075,7 @@ private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () ->
 }
 
 @Composable
-private fun GenerationStats(state: QwenTtsUiState) {
+internal fun GenerationStats(state: QwenTtsUiState) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         Text(if (state.cancelling) "Esperando que se detenga el motor…" else state.generationPhase.ifBlank { state.status },

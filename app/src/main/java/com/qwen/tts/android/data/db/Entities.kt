@@ -36,4 +36,6 @@ data class GenerationEntity(
     val status: String? = null,
     val completedChunks: Int? = null,
     val readingText: String? = null,
+    val languageId: Int? = null,
+    val editLabel: String? = null,
 )
