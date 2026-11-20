@@ -232,6 +232,7 @@ data class QwenTtsUiState(
     val plannedChunks: Int = 0,
     val currentChunk: Int = 0,
     val backgroundGenerationEnabled: Boolean = true,
+    val experimentalBfdot: Boolean = false,
     val supportsCloning: Boolean? = null,
     val speakerEmbeddingDim: Int = 0,
     val temperature: Float = 0.9f,
@@ -273,6 +274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedModelId = savedVariant.id,
             selectedBackendId = backendOptionById(preferences.getString("backend-id", null).orEmpty()).id,
             backgroundGenerationEnabled = preferences.getBoolean("background-generation", true),
+            experimentalBfdot = preferences.getBoolean("experimental-bfdot", false),
             modelReady = isModelReady(savedVariant),
             downloadTotalBytes = savedVariant.totalBytes,
             temperature = preferences.getFloat("temperature", 0.9f).takeIf { it in 0.1f..1.5f } ?: 0.9f,
@@ -431,6 +433,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         backgroundFailure = message
         cancelSynthesis()
         _uiState.update { it.copy(error = message, snackbarMessage = message) }
+    }
+
+    fun updateExperimentalBfdot(enabled: Boolean) {
+        if (_uiState.value.busy) return
+        preferences.edit().putBoolean("experimental-bfdot", enabled).apply()
+        _uiState.update { it.copy(experimentalBfdot = enabled) }
     }
 
     fun onAppBackgrounded() {
@@ -646,6 +654,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         backgroundFailure = null
         startBusy(status = "Preparando generación por fragmentos", resetSynthesis = true)
         val background = _uiState.value.backgroundGenerationEnabled
+        val bfdotRequested = _uiState.value.experimentalBfdot
         _uiState.update { it.copy(plannedChunks = chunks.size, currentChunk = 0, resultModelName = variant.displayName,
             resultBackend = null, resultThreads = threads, resultMode = null, resultReportPath = null, resultStatus = null, resultText = text) }
         if (background && !GenerationForegroundService.begin(getApplication())) {
@@ -678,7 +687,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         visibilityProvider = { GenerationRuntime.isUiVisible },
                         foregroundServiceProvider = { GenerationRuntime.foregroundServiceActive },
                         requestedBackend = requestedBackend.id, temperature = sampling.temperature,
-                        resolvedSeed = sampling.seed, seedMode = sampling.seedMode)
+                        resolvedSeed = sampling.seed, seedMode = sampling.seedMode, bfdotRequested = bfdotRequested)
                     val diagnostic = requireNotNull(diagnostics)
                     diagnostic.noteExecution(background)
                     diagnostic.capture("before_preparation", true)
@@ -709,6 +718,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             diagnostic.capture("model_ready", true)
                             _uiState.update { it.copy(resultBackend = backend, resultMode = mode) }
                             val embedding = if (iclPrompt == null) selectedVoice?.let { speakerEmbeddingFor(native, it, variant) } else null
+                            diagnostic.noteBfdotEnabled(native.configureBfdot(bfdotRequested))
                             val key = "eta-v3-segmented-${variant.id}-$backend-$threads-$mode-$language"
                             var rates = preferences.getString("$key-rates", "").orEmpty().split(',').mapNotNull { it.toDoubleOrNull() }
                             var tails = preferences.getString("$key-tails", "").orEmpty().split(',').mapNotNull { it.toLongOrNull() }
@@ -756,6 +766,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 nativeMillis += result.timeMs
                                 diagnostic.chunk(index + 1, TextChunks.count(chunk), result.timeMs, audio.size, result.sampleRate,
                                     framesSeen, if (truncated) "acoustic_token_limit_reached" else null,
+                                    bfdotUsed = native.takeBfdotUsed(),
                                     timings = mapOf("tokenize" to result.tokenizeMs, "encode" to result.encodeMs,
                                         "generate" to result.generateMs, "decode" to result.decodeMs,
                                         "decodeGraphCompute" to result.decodeGraphComputeMs),
@@ -772,6 +783,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 diagnostic.capture("chunk_saved", true)
                             }
                         } finally {
+                            native.configureBfdot(false)
                             native.setProgressCallback(null)
                             _uiState.update { it.copy(generationPhase = "Liberando memoria del modelo") }
                             native.close()
@@ -2244,6 +2256,7 @@ private fun SettingsScreen(viewModel: MainViewModel) {
             state = state,
             onCpuThreadsChange = viewModel::updateCpuThreads,
             onBackendChange = viewModel::selectBackend,
+            onBfdotChange = viewModel::updateExperimentalBfdot,
         )
     }
 }
@@ -2507,6 +2520,7 @@ private fun RuntimePanel(
     state: QwenTtsUiState,
     onCpuThreadsChange: (Int) -> Unit,
     onBackendChange: (String) -> Unit,
+    onBfdotChange: (Boolean) -> Unit,
 ) {
     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2530,6 +2544,12 @@ private fun RuntimePanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text("Esta versión usa solo CPU. GPU fue deshabilitada tras un bloqueo completo del teléfono.", style = MaterialTheme.typography.bodySmall)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("BFDOT experimental para BF16", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                Switch(checked = state.experimentalBfdot, onCheckedChange = onBfdotChange, enabled = !state.busy)
+            }
+            Text("Solo se habilita si Android anuncia soporte. El JSON indica si se usó en cada fragmento.",
+                style = MaterialTheme.typography.bodySmall)
             Text("Hilos de CPU", style = MaterialTheme.typography.bodySmall)
             Text("Más hilos no garantizan menor tiempo: compará la misma frase y controlá el calentamiento.", style = MaterialTheme.typography.bodySmall)
             listOf(2, 4, 5, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
