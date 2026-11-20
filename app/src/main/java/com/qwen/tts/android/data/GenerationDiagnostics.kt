@@ -45,7 +45,6 @@ internal class GenerationDiagnostics(
     temperature: Float = 0.9f,
     resolvedSeed: Int? = null,
     seedMode: String = "random_per_job",
-    bfdotRequested: Boolean = false,
 ) {
     private val app = context.applicationContext
     private val started = SystemClock.elapsedRealtime()
@@ -131,7 +130,6 @@ internal class GenerationDiagnostics(
                     .put("policy", "Keep short texts together; prefer natural boundaries for longer texts. Acoustic token limit is independent."))
                 .put("maxAudioTokensPerChunk", maxAudioTokens).put("secondsPerAcousticFrame", 0.08)
                 .put("nativeOptimization", "O3; NDEBUG; ARMv8.2-a+dotprod+fp16; BF16 NEON")
-                .put("bfdot", JSONObject().put("requested", bfdotRequested).put("enabled", JSONObject.NULL))
                 .put("sampling", JSONObject().put("temperature", temperature.toDouble()).put("topP", 1.0).put("topK", 50)
                     .put("repetitionPenalty", 1.05).put("vocoderLeftContextSeconds", 2.0)
                     .put("seedMode", seedMode).put("resolvedSeed", resolvedSeed ?: JSONObject.NULL)
@@ -190,11 +188,6 @@ internal class GenerationDiagnostics(
     fun noteExecution(backgroundEnabled: Boolean) {
         report.getJSONObject("execution").put("backgroundServiceRequested", backgroundEnabled)
         event(if (backgroundEnabled) "foreground_service_requested" else "foreground_service_not_requested")
-    }
-
-    @Synchronized
-    fun noteBfdotEnabled(enabled: Boolean) {
-        report.getJSONObject("parameters").getJSONObject("bfdot").put("enabled", enabled)
     }
 
     /** Stable technical events only: do not pass generated/reference text or a private file name. */
@@ -284,7 +277,6 @@ internal class GenerationDiagnostics(
         sampleRate: Int,
         frames: Int? = null,
         warning: String? = null,
-        bfdotUsed: Boolean = false,
         timings: Map<String, Long?> = emptyMap(),
         observedTimings: Map<String, Long?> = emptyMap(),
     ) {
@@ -293,7 +285,7 @@ internal class GenerationDiagnostics(
         val entry = JSONObject().put("index", index).put("characters", chars)
             .put("nativeMillis", nativeMillis).put("audioSamples", audioSamples).put("sampleRate", sampleRate)
             .put("audioSeconds", seconds).put("rtfNative", DiagnosticFormatting.rtf(nativeMillis, audioSamples.toLong(), sampleRate) ?: JSONObject.NULL)
-            .put("acousticFrames", frames ?: JSONObject.NULL).put("bfdotUsed", bfdotUsed)
+            .put("acousticFrames", frames ?: JSONObject.NULL)
         if (warning != null) entry.put("warning", DiagnosticFormatting.safeLabel(warning))
         if (timings.isNotEmpty()) {
             val details = JSONObject()

@@ -27,13 +27,13 @@ class ModelStorageTest {
         assertFalse(smallTalker.exists())
         assertTrue(largeTalker.exists())
         assertTrue(codec.exists())
-        assertFalse(storage.hasFiles(small))
-        assertTrue(storage.hasFiles(large))
+        assertTrue(storage.removalPlan(small).isEmpty())
+        assertEquals(setOf(largeTalker, codec), storage.removalPlan(large).toSet())
         assertEquals(listOf(smallTalker), invalidated)
 
         storage.remove(large)
         assertFalse(codec.exists())
-        assertFalse(storage.hasFiles(large))
+        assertTrue(storage.removalPlan(large).isEmpty())
         assertFalse(File(root, small.storageGroup).exists())
     }
 
@@ -42,12 +42,19 @@ class ModelStorageTest {
         val small = QwenModel.variantById("0_6b_bf16")
         val large = QwenModel.variantById("1_7b_bf16")
         val storage = ModelStorage(root, QwenModel.variants)
-        put(root, small, small.talker.name)
+        val smallTalker = put(root, small, small.talker.name)
         val codec = put(root, small, small.tokenizer.name)
         val partial = put(root, large, "${large.talker.name}.download")
+        val usage = mapOf(
+            smallTalker to ModelStorage.DiskUsage(1, 1, 1, 8192),
+            codec to ModelStorage.DiskUsage(1, 2, 1, 4096),
+            partial to ModelStorage.DiskUsage(1, 3, 1, 512),
+        )
+        assertEquals(mapOf(small.id to 8192L, large.id to 512L), storage.reclaimableBytesByVariant(usage::get))
         storage.remove(small)
         assertTrue(codec.exists())
         assertTrue(partial.exists())
+        assertEquals(mapOf(large.id to 4608L), storage.reclaimableBytesByVariant(usage::get))
         storage.remove(large)
         assertFalse(partial.exists())
         assertFalse(codec.exists())
@@ -60,12 +67,12 @@ class ModelStorageTest {
         val codec = put(root, variant, variant.tokenizer.name)
         val partial = put(root, variant, "${variant.tokenizer.name}.download")
         val unknown = put(root, variant, "unrelated.txt")
-        assertTrue(storage.hasFiles(variant))
+        assertEquals(setOf(codec, partial), storage.removalPlan(variant).toSet())
         storage.remove(variant)
         assertFalse(codec.exists())
         assertFalse(partial.exists())
         assertTrue(unknown.exists())
-        assertFalse(storage.hasFiles(variant))
+        assertTrue(storage.removalPlan(variant).isEmpty())
     }
 
     @Test fun unlinkingReusedWeightsPreservesOtherVariantAndVoiceHistoryDirectories() {
@@ -75,11 +82,16 @@ class ModelStorageTest {
         val codec = put(root, original, original.tokenizer.name)
         val reused = File(File(root, hybrid.storageGroup).apply { mkdirs() }, hybrid.tokenizer.name)
         Files.createLink(reused.toPath(), codec.toPath())
-        put(root, hybrid, hybrid.talker.name)
+        val hybridTalker = put(root, hybrid, hybrid.talker.name)
         val voice = File(temporary.root, "voices/reference.wav").apply { requireNotNull(parentFile).mkdirs(); writeText("voice") }
         val audio = File(temporary.root, "generations/output.wav").apply { requireNotNull(parentFile).mkdirs(); writeText("audio") }
 
-        ModelStorage(root, QwenModel.variants).remove(hybrid)
+        val storage = ModelStorage(root, QwenModel.variants)
+        val shared = ModelStorage.DiskUsage(1, 1, 2, 4096)
+        val usage = mapOf(codec to shared, reused to shared, hybridTalker to ModelStorage.DiskUsage(1, 2, 1, 8192))
+        assertEquals(8192L, storage.reclaimableBytesByVariant(usage::get)[hybrid.id])
+        assertEquals(0L, storage.reclaimableBytesByVariant(usage::get)[original.id])
+        storage.remove(hybrid)
         assertFalse(reused.exists())
         assertEquals("test weights", codec.readText())
         assertEquals("voice", voice.readText())

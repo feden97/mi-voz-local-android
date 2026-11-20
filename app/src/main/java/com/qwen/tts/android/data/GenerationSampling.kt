@@ -4,7 +4,7 @@ import java.security.SecureRandom
 
 /** Resolve one effective seed before work starts, then keep it in the diagnostic report. */
 internal data class GenerationSampling(
-    val temperature: Float = 0.9f,
+    val temperature: Float = DEFAULT_TEMPERATURE,
     val fixedSeed: Int? = null,
 ) {
     init {
@@ -21,6 +21,7 @@ internal data class GenerationSampling(
     )
 
     companion object {
+        const val DEFAULT_TEMPERATURE = 0.9f
         private val random = SecureRandom()
     }
 }

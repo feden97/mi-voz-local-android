@@ -4,16 +4,6 @@
 #include <asm/hwcap.h>
 #include <sys/auxv.h>
 
-#ifdef MIVOZ_BFDOT_APP
-#include <atomic>
-
-extern "C" __attribute__((visibility("default"))) bool mivoz_configure_bfdot(bool requested);
-extern "C" __attribute__((visibility("default"))) bool mivoz_take_bfdot_used();
-
-static std::atomic<bool> mivoz_bfdot_enabled{false};
-static std::atomic<bool> mivoz_bfdot_used{false};
-#endif
-
 static inline bool mivoz_bench_has_bfdot() {
     static const bool supported = (getauxval(AT_HWCAP2) & HWCAP2_BF16) != 0;
     return supported;
@@ -55,37 +45,14 @@ static bool mivoz_bench_bfdot(int n, float * result, const uint16_t * x, const u
 }
 
 static inline bool mivoz_bench_vec_dot(int n, float * result, const void * x, const void * y) {
-#ifdef MIVOZ_BFDOT_APP
-    const bool available = mivoz_bfdot_enabled.load(std::memory_order_relaxed);
-#else
-    const bool available = mivoz_bench_has_bfdot();
-#endif
-    if (available && n > 0 && n % 8 == 0 &&
+    if (mivoz_bench_has_bfdot() && n > 0 && n % 8 == 0 &&
         mivoz_bench_bfdot(n, result, static_cast<const uint16_t *>(x), static_cast<const uint16_t *>(y))) {
-#ifdef MIVOZ_BFDOT_APP
-        if (!mivoz_bfdot_used.load(std::memory_order_relaxed)) {
-            mivoz_bfdot_used.store(true, std::memory_order_relaxed);
-        }
-#endif
         return true;
     }
     return mivoz_vec_dot_bf16_neon(n, result, x, y);
 }
 
-#ifdef MIVOZ_BFDOT_APP
-bool mivoz_configure_bfdot(bool requested) {
-    const bool enabled = requested && mivoz_bench_has_bfdot();
-    mivoz_bfdot_used.store(false, std::memory_order_relaxed);
-    mivoz_bfdot_enabled.store(enabled, std::memory_order_relaxed);
-    return enabled;
-}
-
-bool mivoz_take_bfdot_used() {
-    return mivoz_bfdot_used.exchange(false, std::memory_order_relaxed);
-}
-#endif
-
-// Inject into GGML vec.cpp after loading the baseline.
+// Redirect GGML vec.cpp only in the standalone benchmark build.
 #ifdef MIVOZ_BFDOT_REDIRECT
 #define mivoz_vec_dot_bf16_neon mivoz_bench_vec_dot
 #endif

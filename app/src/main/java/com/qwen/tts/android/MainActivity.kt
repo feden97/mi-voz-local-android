@@ -21,6 +21,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Row
@@ -55,7 +57,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
@@ -67,6 +68,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -106,6 +108,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -185,6 +188,11 @@ private data class SynthesisVoice(val prompt: File?, val embedding: String?) {
 }
 
 private const val SPANISH_LANGUAGE_ID = 2054
+
+private fun supportedCpuThreadCounts(): List<Int> {
+    val available = Runtime.getRuntime().availableProcessors()
+    return (listOf(2, 4, 5, 6, 8).filter { it <= available } + available.coerceIn(1, 5)).distinct().sorted()
+}
 
 private val languageOptions = listOf(
     LanguageOption("Inglés", 2050),
@@ -272,10 +280,9 @@ data class QwenTtsUiState(
     val plannedChunks: Int = 0,
     val currentChunk: Int = 0,
     val backgroundGenerationEnabled: Boolean = true,
-    val experimentalBfdot: Boolean = false,
     val supportsCloning: Boolean? = null,
     val speakerEmbeddingDim: Int = 0,
-    val temperature: Float = 0.9f,
+    val temperature: Float = GenerationSampling.DEFAULT_TEMPERATURE,
     val fixedSeedText: String = "",
     val lastResolvedSeed: Int? = null,
     val useIcl: Boolean = true,
@@ -287,7 +294,8 @@ data class QwenTtsUiState(
     val transcriptionError: String? = null,
     val asrModelReady: Boolean = false,
     val downloadedModelIds: Set<String> = emptySet(),
-    val storedModelIds: Set<String> = emptySet(),
+    val favoriteModelIds: Set<String> = emptySet(),
+    val reclaimableModelBytes: Map<String, Long> = emptyMap(),
     val pendingDeletion: PendingDeletion? = null,
 ) {
     val text: String get() = editor.text
@@ -319,13 +327,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedModelId = savedVariant.id,
             selectedBackendId = backendOptionById(preferences.getString("backend-id", null).orEmpty()).id,
             backgroundGenerationEnabled = preferences.getBoolean("background-generation", true),
-            experimentalBfdot = preferences.getBoolean("experimental-bfdot", false),
             modelReady = isModelReady(savedVariant),
             downloadTotalBytes = savedVariant.totalBytes,
-            temperature = preferences.getFloat("temperature", 0.9f).takeIf { it in 0.1f..1.5f } ?: 0.9f,
+            temperature = preferences.getFloat("temperature", GenerationSampling.DEFAULT_TEMPERATURE)
+                .takeIf { it in 0.1f..1.5f } ?: GenerationSampling.DEFAULT_TEMPERATURE,
             useIcl = preferences.getBoolean("use-icl", true),
             asrModelReady = transcriber.modelAvailable,
             selectedVoiceId = preferences.getString("voice-id", null),
+            favoriteModelIds = preferences.getStringSet("favorite-model-ids", emptySet()).orEmpty().toSet(),
         ),
     )
     val uiState = _uiState.asStateFlow()
@@ -345,7 +354,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         previewFile.delete()
         // Discard the experimental GPU selection saved by 0.3.2 on upgrade.
         preferences.edit().putString("backend-id", "cpu").apply()
-        val threads = preferredCpuThreadCount()
+        val threads = preferences.getInt("cpu-threads", 0)
+            .takeIf { it in supportedCpuThreadCounts() }
+            ?: preferredCpuThreadCount()
         _uiState.update { it.copy(selectedCpuThreads = threads, cpuThreads = threads) }
         refreshModelState()
         viewModelScope.launch {
@@ -500,12 +511,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(error = message, snackbarMessage = message) }
     }
 
-    fun updateExperimentalBfdot(enabled: Boolean) {
-        if (_uiState.value.busy) return
-        preferences.edit().putBoolean("experimental-bfdot", enabled).apply()
-        _uiState.update { it.copy(experimentalBfdot = enabled) }
-    }
-
     fun onAppBackgrounded() {
         stopAudio()
         recorder.cancel()
@@ -530,15 +535,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateCpuThreads(value: Int) {
         if (_uiState.value.busy || recorderState.value.isRecording || _uiState.value.selectedCpuThreads == value) return
-        // GPU schedulers own auxiliary CPU backends configured when the model loads.
-        // Recreate the pipeline so the requested thread count applies to those too.
         synchronized(nativeLock) {
             engine?.close()
             engine = null
         }
+        preferences.edit().putInt("cpu-threads", value).apply()
         _uiState.update { it.copy(selectedCpuThreads = value, cpuThreads = value, loaded = false,
             activeBackendName = null, supportsCloning = null, speakerEmbeddingDim = 0,
-            status = "$value hilos seleccionados; cargá el modelo para aplicarlos") }
+            status = "$value hilos seleccionados") }
     }
 
     fun selectBackend(backendId: String) {
@@ -570,6 +574,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearSnackbarMessage() {
         _uiState.update { it.copy(snackbarMessage = null) }
+    }
+
+    fun toggleFavoriteModel(modelId: String) {
+        val current = _uiState.value.favoriteModelIds
+        val updated = if (modelId in current) current - modelId else current + modelId
+        preferences.edit().putStringSet("favorite-model-ids", updated).apply()
+        _uiState.update { it.copy(favoriteModelIds = updated) }
     }
 
     fun selectModel(modelId: String) {
@@ -637,14 +648,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     refreshModelState("Modelo listo")
                 },
                 onFailure = { throwable ->
-                    stopBusyTicker()
+                    refreshModelState("Falló la descarga")
                     _uiState.update {
-                        it.copy(
-                            busy = false,
-                            downloading = false,
-                            status = "Falló la descarga",
-                            error = throwable.message ?: "Falló la descarga",
-                        )
+                        it.copy(error = throwable.message ?: "Falló la descarga")
                     }
                 },
             )
@@ -717,7 +723,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         backgroundFailure = null
         startBusy(status = "Preparando generación por fragmentos", resetSynthesis = true)
         val background = _uiState.value.backgroundGenerationEnabled
-        val bfdotRequested = _uiState.value.experimentalBfdot
         unsavedGeneration = null
         _uiState.update { it.copy(plannedChunks = chunks.size, currentChunk = 0, resultModelName = variant.displayName,
             resultBackend = null, resultThreads = threads, resultMode = null, resultReportPath = null, resultStatus = null,
@@ -753,7 +758,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         visibilityProvider = { GenerationRuntime.isUiVisible },
                         foregroundServiceProvider = { GenerationRuntime.foregroundServiceActive },
                         requestedBackend = requestedBackend.id, temperature = sampling.temperature,
-                        resolvedSeed = sampling.seed, seedMode = sampling.seedMode, bfdotRequested = bfdotRequested)
+                        resolvedSeed = sampling.seed, seedMode = sampling.seedMode)
                     val diagnostic = requireNotNull(diagnostics)
                     diagnostic.noteExecution(background)
                     diagnostic.capture("before_preparation", true)
@@ -773,7 +778,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             diagnostic.capture("model_ready", true)
                             _uiState.update { it.copy(resultBackend = backend, resultMode = mode) }
                         }
-                        diagnostic.noteBfdotEnabled(native.configureBfdot(bfdotRequested))
                         val key = "eta-v3-segmented-${variant.id}-$backend-$threads-$mode-$language"
                         var rates = preferences.getString("$key-rates", "").orEmpty().split(',').mapNotNull { it.toDoubleOrNull() }
                         var tails = preferences.getString("$key-tails", "").orEmpty().split(',').mapNotNull { it.toLongOrNull() }
@@ -820,7 +824,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             nativeMillis += result.timeMs
                             diagnostic.chunk(index + 1, TextChunks.count(chunk), result.timeMs, audio.size, result.sampleRate,
                                 framesSeen, if (truncated) "acoustic_token_limit_reached" else null,
-                                bfdotUsed = native.takeBfdotUsed(),
                                 timings = mapOf("tokenize" to result.tokenizeMs, "encode" to result.encodeMs,
                                     "generate" to result.generateMs, "decode" to result.decodeMs,
                                     "decodeGraphCompute" to result.decodeGraphComputeMs),
@@ -901,7 +904,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val variant = if (recordedModelId == null) selectedVariant() else QwenModel.variants.firstOrNull { it.id == recordedModelId }
         if (variant == null || !isModelReady(variant)) {
             val model = variant?.displayName ?: source?.generation?.modelName ?: "el modelo de esta grabación"
-            _uiState.update { it.copy(previewMessage = "Prepará $model en Ajustes antes de generar.") }
+            _uiState.update { it.copy(previewMessage = "Elegí y descargá $model en Estudio antes de generar.") }
             return
         }
         val sampling = runCatching { resolveSampling() }.getOrElse { error ->
@@ -929,7 +932,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     withSynthesisEngine { native ->
                         val voice = prepareSynthesisVoice(native, variant, selectedVoice, transcript)
-                        native.configureBfdot(current.experimentalBfdot)
                         val params = QwenEngine.NativeParams(languageId = source?.languageId ?: current.selectedLanguageId,
                             temperature = sampling.temperature, seed = sampling.seed.toLong())
                         _uiState.update { it.copy(generationPhase = "Generando la prueba") }
@@ -1131,7 +1133,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun uninstallModel(modelId: String) {
-        if (!_uiState.value.busy && !recorderState.value.isRecording && QwenModel.variants.any { it.id == modelId })
+        if (!_uiState.value.busy && !recorderState.value.isRecording && modelId in _uiState.value.reclaimableModelBytes)
             _uiState.update { it.copy(pendingDeletion = PendingDeletion.Model(modelId)) }
     }
 
@@ -1406,7 +1408,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         try {
             block(native)
         } finally {
-            native.configureBfdot(false)
             native.setProgressCallback(null)
             _uiState.update { it.copy(generationPhase = "Liberando memoria del modelo") }
             native.close()
@@ -1443,7 +1444,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadReferenceEncoder(native: QwenEngine, variant: ModelVariant) {
         variant.files.forEach { file ->
             check(isVerifiedModelFile(File(modelDirectory(variant), file.name), file)) {
-                "El modelo no está verificado. Descargalo o reparalo en Ajustes."
+                "El modelo no está verificado. Descargalo en Estudio o reparalo en Ajustes → Almacenamiento de modelos."
             }
         }
         configureBackend(native)
@@ -1487,7 +1488,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(generationPhase = "Verificando modelo") }
             variant.files.forEach { file ->
                 check(isVerifiedModelFile(File(modelDirectory(variant), file.name), file)) {
-                    "El archivo ${file.name} no coincide con el modelo esperado. Volvé a descargarlo en Ajustes."
+                    "El archivo ${file.name} no coincide con el modelo esperado. Reparalo en Ajustes → Almacenamiento de modelos."
                 }
             }
             diagnostics?.stage("model_integrity_check", SystemClock.elapsedRealtime() - checkStarted)
@@ -1615,12 +1616,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshModelState(status: String? = null) {
         val variant = selectedVariant()
         val ready = isModelReady(variant)
+        val reclaimable = modelStorage.reclaimableBytesByVariant()
         stopBusyTicker()
         _uiState.update {
             it.copy(
                 modelReady = ready,
                 downloadedModelIds = QwenModel.variants.filter { isModelReady(it) }.map { it.id }.toSet(),
-                storedModelIds = QwenModel.variants.filter { modelStorage.hasFiles(it) }.map { it.id }.toSet(),
+                reclaimableModelBytes = reclaimable,
                 busy = false,
                 downloading = false,
                 downloadTotalBytes = variant.totalBytes,
@@ -1934,50 +1936,50 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
 private fun destinationIndex(route: String?): Int =
     appDestinations.indexOfFirst { it.route == route }.takeIf { it >= 0 } ?: 0
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StudioModelSelector(state: QwenTtsUiState, onSelect: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val selected = QwenModel.variantById(state.selectedModelId)
-    ExposedDropdownMenuBox(expanded = expanded && !state.busy, onExpandedChange = { if (!state.busy) expanded = it }) {
-        OutlinedTextField(value = selected.displayName, onValueChange = {}, readOnly = true,
-            enabled = !state.busy, label = { Text("Modelo") },
-            supportingText = { Text(if (state.loaded) "Preparado en memoria" else if (state.modelReady) "Descargado; se prepara al generar" else "Necesita preparar los archivos") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            modifier = Modifier.menuAnchor().fillMaxWidth())
-        ExposedDropdownMenu(expanded = expanded && !state.busy, onDismissRequest = { expanded = false }) {
-            QwenModel.variants.sortedByDescending { it.id in state.downloadedModelIds }.forEach { variant ->
-                DropdownMenuItem(text = { Text(variant.displayName + if (variant.id in state.downloadedModelIds) " · descargado" else "") },
-                    onClick = { expanded = false; onSelect(variant.id) })
+private fun StudioChoice(label: String, value: String, enabled: Boolean, onClick: () -> Unit) {
+    Surface(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(value, style = MaterialTheme.typography.bodyLarge)
             }
+            Icon(Icons.Default.ExpandMore, contentDescription = null)
         }
     }
 }
 
 @Composable
-private fun SamplingPanel(state: QwenTtsUiState, onTemperature: (Float) -> Unit, onSeed: (String) -> Unit, onReuseSeed: () -> Unit) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    OutlinedButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Ocultar ajustes de variación" else "Variación y comparación de tomas") }
-    if (expanded) {
-        ElevatedCard {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Temperatura: ${String.format(Locale.getDefault(), "%.2f", state.temperature)}", fontWeight = FontWeight.SemiBold)
-                Slider(value = state.temperature, onValueChange = onTemperature, valueRange = 0.1f..1.5f,
-                    enabled = !state.busy)
-                Text("0,9 es el ajuste habitual. Valores mayores agregan variación; no garantizan más emoción.", style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(value = state.fixedSeedText, onValueChange = onSeed,
-                    label = { Text("Semilla fija (opcional)") }, singleLine = true, enabled = !state.busy,
-                    supportingText = { Text("Vacío: una toma nueva. Número de 1 a 2147483647: repetir o comparar ajustes.") },
-                    keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth())
-                state.lastResolvedSeed?.let { seed ->
-                    TextButton(onClick = onReuseSeed, enabled = !state.busy) { Text("Usar última semilla: $seed") }
-                }
-                Text("Para comparar, conservá voz, texto, modelo y semilla. Cambiar modelo o modo puede cambiar la toma incluso con igual semilla.", style = MaterialTheme.typography.bodySmall)
+private fun SamplingPanel(
+    state: QwenTtsUiState,
+    onTemperature: (Float) -> Unit,
+    onSeed: (String) -> Unit,
+    onReuseSeed: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Temperatura ${formatTemperature(state.temperature)}", modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.titleSmall)
+        if (state.temperature != GenerationSampling.DEFAULT_TEMPERATURE) {
+            TextButton(onClick = { onTemperature(GenerationSampling.DEFAULT_TEMPERATURE) }, enabled = !state.busy) {
+                Text("Volver a ${formatTemperature(GenerationSampling.DEFAULT_TEMPERATURE)}")
             }
         }
     }
+    Slider(value = state.temperature, onValueChange = onTemperature, valueRange = 0.1f..1.5f,
+        enabled = !state.busy, modifier = Modifier.semantics { stateDescription = "Temperatura ${formatTemperature(state.temperature)}" })
+    Text("A mayor temperatura, más variación entre tomas.", style = MaterialTheme.typography.bodySmall)
+    val invalidSeed = state.fixedSeedText.isNotEmpty() && state.fixedSeedText.toIntOrNull()?.let { it > 0 } != true
+    OutlinedTextField(value = state.fixedSeedText, onValueChange = onSeed,
+        label = { Text("Semilla fija") }, singleLine = true, enabled = !state.busy, isError = invalidSeed,
+        supportingText = { Text(if (invalidSeed) "Ingresá un número entre 1 y 2147483647." else "Dejala vacía para variar la toma.") },
+        keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth())
+    state.lastResolvedSeed?.let { seed ->
+        TextButton(onClick = onReuseSeed, enabled = !state.busy) { Text("Usar la última semilla ($seed)") }
+    }
 }
+
+private fun formatTemperature(value: Float) = String.format(Locale.getDefault(), "%.2f", value)
 
 @Composable
 private fun VoiceTranscriptEditor(viewModel: MainViewModel) {
@@ -2034,7 +2036,8 @@ private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) 
     }
     val voices by viewModel.voices.collectAsState()
     val transcripts by viewModel.voiceTranscripts.collectAsState()
-    var showVoicePicker by remember { mutableStateOf(false) }
+    var showVoicePicker by rememberSaveable { mutableStateOf(false) }
+    var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showReadingEditor by rememberSaveable { mutableStateOf(false) }
     var previewDraft by rememberSaveable { mutableStateOf<String?>(null) }
     var reportToExport by remember { mutableStateOf<String?>(null) }
@@ -2059,6 +2062,17 @@ private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) 
                 viewModel.selectVoice(voiceId)
                 showVoicePicker = false
             },
+        )
+    }
+    if (showModelPicker) {
+        ModelPicker(
+            state = state,
+            onDismiss = { showModelPicker = false },
+            onSelect = {
+                viewModel.selectModel(it)
+                showModelPicker = false
+            },
+            onToggleFavorite = viewModel::toggleFavoriteModel,
         )
     }
 
@@ -2102,15 +2116,26 @@ private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) 
                 .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Texto a voz", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.semantics { heading() })
             state.error?.let { error ->
                 Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            }
+            Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface) {
+                Column {
+                    StudioChoice(if (selectedVoice == null) "Voz" else "Voz · $voiceMode", selectedVoiceName, !state.busy) {
+                        focusManager.clearFocus()
+                        showVoicePicker = true
+                    }
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                    StudioChoice(if (state.modelReady) "Modelo" else "Modelo · pendiente de descarga",
+                        selectedModel.displayName, !state.busy) {
+                        focusManager.clearFocus()
+                        showModelPicker = true
+                    }
+                }
             }
             ComposerPanel(
                 state = state,
                 characters = characters,
-                selectedVoiceName = selectedVoiceName,
-                voiceMode = voiceMode,
                 onTextChange = viewModel::updateText,
                 onPrepareText = {
                     focusManager.clearFocus()
@@ -2125,7 +2150,6 @@ private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) 
                 },
                 onRestoreOriginal = viewModel::restoreOriginalText,
                 validScript = validScript,
-                onVoicePickerClick = { if (!state.busy) showVoicePicker = true },
             )
             if (!state.busy && (state.sampleCount > 0 || state.resultReportPath != null)) {
                 ResultPanel(
@@ -2137,20 +2161,21 @@ private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) 
                     onCopyReadingText = { state.resultReadingText?.let(viewModel::copyText) },
                 )
             }
-            StudioDisclosure("Opciones de voz y modelo", selectedModel.displayName) {
-                StudioModelSelector(state, viewModel::selectModel)
+            StudioDisclosure("Opciones de generación", languageOptions.firstOrNull { it.id == state.selectedLanguageId }?.label) {
                 LanguageDropdown(state.selectedLanguageId, !state.busy, viewModel::updateLanguage)
-                selectedVoice?.let { voice ->
-                    if (hasTranscript) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text("Clonar con audio y transcripción", modifier = Modifier.weight(1f))
-                            Switch(checked = state.useIcl, onCheckedChange = viewModel::updateUseIcl, enabled = !state.busy)
-                        }
-                    }
-                    TextButton(onClick = { viewModel.editTranscript(voice) }, enabled = !state.busy) {
-                        Text(if (hasTranscript) "Ver transcripción" else "Agregar transcripción")
+                if (hasTranscript) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Clonar con audio y transcripción", modifier = Modifier.weight(1f))
+                        Switch(checked = state.useIcl, onCheckedChange = viewModel::updateUseIcl, enabled = !state.busy,
+                            modifier = Modifier.semantics { contentDescription = "Clonar con audio y transcripción" })
                     }
                 }
+                selectedVoice?.let { voice ->
+                    TextButton(onClick = { viewModel.editTranscript(voice) }, enabled = !state.busy) {
+                        Text(if (hasTranscript) "Editar transcripción" else "Agregar transcripción")
+                    }
+                }
+                HorizontalDivider()
                 SamplingPanel(state, viewModel::updateTemperature, viewModel::updateFixedSeed, viewModel::reuseLastSeed)
             }
         }
@@ -2163,7 +2188,6 @@ private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) 
                     LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                 }
                 state.canCancel && !state.previewInProgress -> GenerationStats(state)
-                !state.modelReady && !state.busy -> Text("Descargá el modelo para empezar.", style = MaterialTheme.typography.bodySmall)
             }
             Button(
                 onClick = {
@@ -2410,7 +2434,7 @@ private fun VoicesScreen(viewModel: MainViewModel) {
                     Text("Importar archivo de audio")
                 }
                 if (!state.modelReady) {
-                    Text("Primero descargá el modelo en Ajustes. Luego la clonación y la generación funcionan sin conexión.", style = MaterialTheme.typography.bodySmall)
+                    Text("Descargá el modelo en Estudio para clonar y generar sin conexión.", style = MaterialTheme.typography.bodySmall)
                 }
                 if (state.busy) {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -2604,8 +2628,9 @@ private fun DeletionConfirmation(viewModel: MainViewModel) {
     when (pending) {
         is PendingDeletion.Model -> {
             val variant = QwenModel.variantById(pending.modelId)
+            val bytes = state.reclaimableModelBytes[pending.modelId] ?: 0L
             title = "¿Desinstalar modelo?"
-            message = "Se quitarán los archivos de ${variant.displayName}. Los códecs compartidos se conservan si otro modelo los necesita. Tus voces, referencias y audios del historial se conservan. Podés volver a descargarlo después."
+            message = "${variant.displayName}\nEspacio a liberar: ${formatBytes(bytes)} aprox.\n\nSe conservan tus voces, tu historial y los archivos que usan otros modelos."
             action = "Desinstalar"
         }
         is PendingDeletion.Voice -> {
@@ -2636,23 +2661,24 @@ private fun DeletionConfirmation(viewModel: MainViewModel) {
 
 @Composable
 private fun InstalledModelsPanel(state: QwenTtsUiState, onUninstall: (String) -> Unit) {
-    val stored = QwenModel.variants.filter { it.id in state.storedModelIds }
-    if (stored.isEmpty()) return
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Modelos descargados", style = MaterialTheme.typography.titleMedium)
-            Text("Podés desinstalarlos sin borrar voces ni historial. Se pedirá confirmación.", style = MaterialTheme.typography.bodySmall)
-            stored.forEach { model ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(model.displayName, style = MaterialTheme.typography.bodyMedium)
-                        Text(if (model.id in state.downloadedModelIds) "Descargado" else "Archivos parciales",
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                    IconButton(onClick = { onUninstall(model.id) }, enabled = !state.busy) {
-                        Icon(Icons.Default.Delete, contentDescription = "Desinstalar ${model.displayName}")
-                    }
-                }
+    if (state.reclaimableModelBytes.isEmpty()) {
+        Text("Podés elegir y descargar un modelo desde Estudio.", style = MaterialTheme.typography.bodyMedium)
+    }
+    QwenModel.variants.forEach { model ->
+        val bytes = state.reclaimableModelBytes[model.id] ?: return@forEach
+        val status = when {
+            model.id !in state.downloadedModelIds -> "Descarga incompleta · "
+            model.id == state.selectedModelId -> "En uso · "
+            else -> ""
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(model.displayName, style = MaterialTheme.typography.bodyMedium)
+                Text("${status}Libera ${formatBytes(bytes)} aprox.", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = { onUninstall(model.id) }, enabled = !state.busy) {
+                Icon(Icons.Default.Delete, contentDescription = "Desinstalar ${model.displayName}")
             }
         }
     }
@@ -2682,7 +2708,8 @@ private fun SettingsScreen(viewModel: MainViewModel) {
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Generar en segundo plano", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                    Switch(checked = state.backgroundGenerationEnabled, onCheckedChange = viewModel::updateBackgroundGeneration, enabled = !state.busy)
+                    Switch(checked = state.backgroundGenerationEnabled, onCheckedChange = viewModel::updateBackgroundGeneration,
+                        enabled = !state.busy, modifier = Modifier.semantics { contentDescription = "Generar en segundo plano" })
                 }
                 Text(
                     if (state.backgroundGenerationEnabled) "Permite continuar con la pantalla apagada. En el S23 el bloqueo puede ralentizar la generación."
@@ -2694,17 +2721,36 @@ private fun SettingsScreen(viewModel: MainViewModel) {
                 }
             }
         }
-        StudioDisclosure("Modelos", QwenModel.variantById(state.selectedModelId).displayName) {
-            ModelPanel(state, viewModel::selectModel, viewModel::downloadModel, viewModel::loadModel)
-            InstalledModelsPanel(state, viewModel::uninstallModel)
-            TextButton(onClick = viewModel::releaseMemory, enabled = !state.busy) { Text("Liberar memoria del modelo") }
-            Text(state.status, style = MaterialTheme.typography.bodySmall)
+        val downloaded = state.downloadedModelIds.size
+        val partial = (state.reclaimableModelBytes.size - downloaded).coerceAtLeast(0)
+        val modelSummary = when {
+            downloaded == 0 && partial == 0 -> "Sin descargas"
+            partial == 0 -> if (downloaded == 1) "1 modelo descargado" else "$downloaded modelos descargados"
+            else -> "$downloaded listos · $partial incompletos"
         }
-        RuntimePanel(
-            state = state,
-            onCpuThreadsChange = viewModel::updateCpuThreads,
-            onBfdotChange = viewModel::updateExperimentalBfdot,
-        )
+        StudioDisclosure("Almacenamiento de modelos", modelSummary) {
+            InstalledModelsPanel(state, viewModel::uninstallModel)
+            if (state.downloading) {
+                LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                Text("${formatBytes(state.downloadBytes)} / ${formatBytes(state.downloadTotalBytes)}", style = MaterialTheme.typography.bodySmall)
+            } else if (state.modelReady) {
+                TextButton(onClick = viewModel::downloadModel, enabled = !state.busy) {
+                    Text("Verificar y reparar el modelo en uso")
+                }
+            }
+        }
+        StudioDisclosure("Rendimiento", "CPU · ${state.selectedCpuThreads} hilos") {
+            CpuThreadOptions(state, viewModel::updateCpuThreads)
+            if (state.modelReady) {
+                TextButton(
+                    onClick = { if (state.loaded) viewModel.releaseMemory() else viewModel.loadModel() },
+                    enabled = !state.busy,
+                ) {
+                    Text(if (state.loaded) "Liberar RAM del modelo" else "Preparar modelo en memoria")
+                }
+            }
+            if (state.busy && !state.downloading) Text(state.status, style = MaterialTheme.typography.bodySmall)
+        }
         StudioDisclosure("Diagnóstico", if (hasReport) "Último registro disponible" else "Todavía no hay un registro") {
             TextButton(onClick = { latestJson.launch("mi-voz-ultimo-registro.json") }, enabled = !state.busy && hasReport) { Text("Exportar último JSON") }
             TextButton(onClick = { latestText.launch("mi-voz-ultimo-registro.txt") }, enabled = !state.busy && hasReport) { Text("Exportar último TXT") }
@@ -2717,14 +2763,11 @@ private fun SettingsScreen(viewModel: MainViewModel) {
 private fun ComposerPanel(
     state: QwenTtsUiState,
     characters: Int,
-    selectedVoiceName: String,
-    voiceMode: String,
     onTextChange: (TextFieldValue) -> Unit,
     onPrepareText: () -> Unit,
     onPreview: () -> Unit,
     onRestoreOriginal: () -> Unit,
     validScript: Boolean,
-    onVoicePickerClick: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Surface(color = MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.large) {
@@ -2765,24 +2808,6 @@ private fun ComposerPanel(
         }
         if (state.originalText != null) {
             TextButton(onClick = onRestoreOriginal, enabled = !state.busy) { Text("Volver al texto original") }
-        }
-        Surface(
-            onClick = onVoicePickerClick,
-            enabled = !state.busy,
-            color = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            shape = MaterialTheme.shapes.medium,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.RecordVoiceOver, contentDescription = null)
-                Column(Modifier.weight(1f)) {
-                    Text(selectedVoiceName, style = MaterialTheme.typography.titleMedium)
-                    Text(voiceMode, style = MaterialTheme.typography.bodySmall)
-                }
-                Icon(Icons.Default.ExpandMore, contentDescription = "Elegir voz")
-            }
         }
     }
 }
@@ -2909,120 +2934,19 @@ private fun LanguageDropdown(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ModelPanel(
-    state: QwenTtsUiState,
-    onModelChange: (String) -> Unit,
-    onDownload: () -> Unit,
-    onLoad: () -> Unit,
-) {
-    val selectedVariant = QwenModel.variantById(state.selectedModelId)
-    var expanded by remember { mutableStateOf(false) }
-    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            ExposedDropdownMenuBox(
-                expanded = expanded && !state.busy,
-                onExpandedChange = { if (!state.busy) expanded = !expanded },
-            ) {
-                OutlinedTextField(
-                    value = selectedVariant.displayName,
-                    onValueChange = {},
-                    readOnly = true,
-                    enabled = !state.busy,
-                    label = { Text("Modelo Qwen3-TTS Base") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                    modifier = Modifier.menuAnchor().fillMaxWidth(),
-                )
-                ExposedDropdownMenu(expanded = expanded && !state.busy, onDismissRequest = { expanded = false }) {
-                    QwenModel.variants.forEach { variant ->
-                        DropdownMenuItem(
-                            text = { Text("${variant.displayName} · ${formatBytes(variant.totalBytes)}") },
-                            onClick = {
-                                expanded = false
-                                onModelChange(variant.id)
-                            },
-                        )
-                    }
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.GraphicEq, contentDescription = null)
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(selectedVariant.displayName, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "${formatBytes(selectedVariant.totalBytes)} de modelos en disco",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                AssistChip(onClick = {}, label = { Text(if (state.modelReady) "Listo" else "Falta descargar") })
-            }
-            Text(
-                "Se descarga solo la variante elegida. El códec se comparte entre 0.6B y 1.7B de la misma precisión. El tamaño en disco no indica la RAM necesaria.",
-                style = MaterialTheme.typography.bodySmall,
+private fun CpuThreadOptions(state: QwenTtsUiState, onSelect: (Int) -> Unit) {
+    Text("Hilos de CPU", style = MaterialTheme.typography.bodyMedium)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        supportedCpuThreadCounts().forEach { threads ->
+            FilterChip(
+                selected = state.selectedCpuThreads == threads,
+                onClick = { onSelect(threads) },
+                enabled = !state.busy,
+                label = { Text(threads.toString()) },
+                modifier = Modifier.semantics { contentDescription = "$threads hilos de CPU" },
             )
-            if (!selectedVariant.quantized) {
-                Text(
-                    "BF16 conserva los pesos a 16 bits y usa más memoria. Su velocidad y estabilidad en este teléfono siguen pendientes de prueba; Android puede cerrar el proceso si falta RAM.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            if (state.downloading) {
-                LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-                Text("${formatBytes(state.downloadBytes)} / ${formatBytes(state.downloadTotalBytes)}", style = MaterialTheme.typography.bodySmall)
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = onDownload,
-                    enabled = !state.busy,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (state.modelReady) "Verificar y reparar" else "Descargar modelo")
-                }
-                OutlinedButton(
-                    onClick = onLoad,
-                    enabled = state.modelReady && !state.loaded && !state.busy,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (state.loaded) "Cargado" else "Cargar")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RuntimePanel(
-    state: QwenTtsUiState,
-    onCpuThreadsChange: (Int) -> Unit,
-    onBfdotChange: (Boolean) -> Unit,
-) {
-    StudioDisclosure("Rendimiento", "CPU · ${state.selectedCpuThreads} hilos") {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("BFDOT experimental para BF16", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-            Switch(checked = state.experimentalBfdot, onCheckedChange = onBfdotChange, enabled = !state.busy)
-        }
-        Text("Solo se habilita si Android anuncia soporte. El JSON indica si se usó en cada fragmento.",
-            style = MaterialTheme.typography.bodySmall)
-        Text("Hilos de CPU", style = MaterialTheme.typography.bodySmall)
-        listOf(2, 4, 5, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                options.forEach { threads ->
-                    FilterChip(
-                        selected = state.selectedCpuThreads == threads,
-                        onClick = { onCpuThreadsChange(threads) },
-                        enabled = !state.busy,
-                        label = { Text("$threads hilos") },
-                    )
-                }
-            }
         }
     }
 }
@@ -3090,7 +3014,7 @@ internal fun GenerationStats(state: QwenTtsUiState) {
     }
 }
 
-private fun formatBytes(bytes: Long): String {
+internal fun formatBytes(bytes: Long): String {
     if (bytes < 1024L) return "$bytes B"
     val units = arrayOf("KB", "MB", "GB", "TB")
     var value = bytes.toDouble() / 1024.0

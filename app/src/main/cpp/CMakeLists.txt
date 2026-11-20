@@ -75,9 +75,6 @@ if (QWEN3_ANDROID_VULKAN AND CMAKE_HOST_WIN32)
     endif()
 endif()
 add_subdirectory("${GGML_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ggml")
-set_property(SOURCE "${GGML_DIR}/src/ggml-cpu/vec.cpp" TARGET_DIRECTORY ggml-cpu
-    APPEND PROPERTY COMPILE_OPTIONS "-DMIVOZ_BFDOT_REDIRECT" "-DMIVOZ_BFDOT_APP"
-    "-include" "${CMAKE_CURRENT_LIST_DIR}/../../../../patches/mivoz_bfdot.h")
 
 find_package(Threads REQUIRED)
 
@@ -178,7 +175,6 @@ target_compile_definitions(qwen3_tts PRIVATE QWEN3_TTS_EXPORT)
 
 add_library(qwen3_tts_jni SHARED
     "${QWEN3_TTS_ROOT}/src/qwen3_tts_jni.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/bfdot_jni.cpp"
 )
 target_include_directories(qwen3_tts_jni PRIVATE "${QWEN3_TTS_ROOT}/src")
 target_compile_definitions(qwen3_tts_jni PRIVATE QWEN3_TTS_STATIC)
