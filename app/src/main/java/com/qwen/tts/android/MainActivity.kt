@@ -22,11 +22,16 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -38,6 +43,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.GraphicEq
@@ -48,7 +55,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
@@ -68,6 +74,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -77,6 +84,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.Lifecycle
@@ -91,7 +102,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -99,7 +116,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -1579,6 +1595,7 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
     val currentRoute = backStackEntry?.destination?.route ?: AppDestination.Studio.route
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     VoiceTranscriptEditor(viewModel)
     DeletionConfirmation(viewModel)
     val context = LocalContext.current
@@ -1603,9 +1620,26 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            if (!keyboardOpen) {
+                TopAppBar(
+                    title = {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (currentRoute == AppDestination.Studio.route) {
+                                Icon(Icons.Default.GraphicEq, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                            Text(if (currentRoute == AppDestination.Studio.route) "Mi Voz Local" else appDestinations[destinationIndex(currentRoute)].label,
+                                modifier = Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                )
+            }
+        },
         bottomBar = {
-            NavigationBar {
+            if (!keyboardOpen) NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 appDestinations.forEach { destination ->
                     NavigationBarItem(
                         selected = currentRoute == destination.route,
@@ -1618,6 +1652,10 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
                         },
                         icon = destination.icon,
                         label = { Text(destination.label) },
+                        colors = NavigationBarItemDefaults.colors(
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
                     )
                 }
             }
@@ -1626,7 +1664,7 @@ private fun QwenTtsApp(viewModel: MainViewModel = GenerationRuntime.get(LocalCon
         NavHost(
             navController = navController,
             startDestination = AppDestination.Studio.route,
-            modifier = Modifier.padding(padding),
+            modifier = Modifier.padding(padding).consumeWindowInsets(padding).imePadding(),
             enterTransition = {
                 val direction = if (destinationIndex(targetState.destination.route) >= destinationIndex(initialState.destination.route)) {
                     AnimatedContentTransitionScope.SlideDirection.Start
@@ -1671,7 +1709,7 @@ private fun destinationIndex(route: String?): Int =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StudioModelSelector(state: QwenTtsUiState, onSelect: (String) -> Unit, onPrepare: () -> Unit) {
+private fun StudioModelSelector(state: QwenTtsUiState, onSelect: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val selected = QwenModel.variantById(state.selectedModelId)
     ExposedDropdownMenuBox(expanded = expanded && !state.busy, onExpandedChange = { if (!state.busy) expanded = it }) {
@@ -1686,10 +1724,6 @@ private fun StudioModelSelector(state: QwenTtsUiState, onSelect: (String) -> Uni
                     onClick = { expanded = false; onSelect(variant.id) })
             }
         }
-    }
-    if (!state.modelReady) {
-        OutlinedButton(onClick = onPrepare, enabled = !state.busy) { Text("Preparar / descargar modelo") }
-        if (state.downloading) LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
     }
 }
 
@@ -1766,6 +1800,7 @@ private fun VoiceTranscriptEditor(viewModel: MainViewModel) {
 private fun StudioScreen(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsState()
     val studioContext = LocalContext.current
+    val focusManager = LocalFocusManager.current
     var notificationPrompted by rememberSaveable { mutableStateOf(false) }
     val generationNotificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         if (GenerationRuntime.isUiVisible) viewModel.synthesize()
@@ -1783,7 +1818,8 @@ private fun StudioScreen(viewModel: MainViewModel) {
         reportToExport = null
     }
 
-    val selectedVoiceName = voices.firstOrNull { it.voiceId == state.selectedVoiceId }?.name ?: "Voz predeterminada"
+    val selectedVoice = voices.firstOrNull { it.voiceId == state.selectedVoiceId }
+    val selectedVoiceName = selectedVoice?.name ?: "Voz predeterminada"
 
     if (showVoicePicker) {
         VoicePickerSheet(
@@ -1797,49 +1833,36 @@ private fun StudioScreen(viewModel: MainViewModel) {
         )
     }
 
-    Box(Modifier.fillMaxSize()) {
+    val characters = remember(state.text) { TextChunks.count(state.text) }
+    val selectedModel = QwenModel.variantById(state.selectedModelId)
+    val hasTranscript = selectedVoice?.let { !transcripts[it.voiceId].isNullOrBlank() } == true
+    val voiceMode = when {
+        selectedVoice == null -> "Voz del modelo"
+        state.useIcl && hasTranscript -> "Audio y transcripción"
+        else -> "Solo timbre"
+    }
+    Column(Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
+                .weight(1f)
+                .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-                .padding(bottom = 88.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Texto a voz", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("Texto a voz", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.semantics { heading() })
             state.error?.let { error ->
                 Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
-            StudioModelSelector(state, viewModel::selectModel, viewModel::downloadModel)
             ComposerPanel(
                 state = state,
+                characters = characters,
                 selectedVoiceName = selectedVoiceName,
+                voiceMode = voiceMode,
                 onTextChange = viewModel::updateText,
                 onVoicePickerClick = { if (!state.busy) showVoicePicker = true },
-                onLanguageChange = viewModel::updateLanguage,
             )
-            Text(
-                when {
-                    state.selectedVoiceId == null -> "Voz del modelo: no usa una referencia personal."
-                    state.useIcl && !transcripts[state.selectedVoiceId.orEmpty()].isNullOrBlank() -> "Clonación con audio y sus palabras escritas (ICL)."
-                    else -> "Solo timbre: en Voces podés escribir lo que dice la grabación original para usar también su contenido al clonar."
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-            voices.firstOrNull { it.voiceId == state.selectedVoiceId }?.let { voice ->
-                val hasTranscript = !transcripts[voice.voiceId].isNullOrBlank()
-                if (hasTranscript) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Usar audio + transcripción (ICL)", modifier = Modifier.weight(1f))
-                        Switch(checked = state.useIcl, onCheckedChange = viewModel::updateUseIcl, enabled = !state.busy)
-                    }
-                }
-                TextButton(onClick = { viewModel.editTranscript(voice) }, enabled = !state.busy) {
-                    Text(if (hasTranscript) "Ver transcripción de ${voice.name}" else "Transcribir ${voice.name} para ICL")
-                }
-            }
-            SamplingPanel(state, viewModel::updateTemperature, viewModel::updateFixedSeed, viewModel::reuseLastSeed)
-            if ((state.busy && !state.downloading) || state.sampleCount > 0 || state.resultReportPath != null) {
+            if (!state.busy && (state.sampleCount > 0 || state.resultReportPath != null)) {
                 ResultPanel(
                     state = state,
                     onPlay = viewModel::playAudio,
@@ -1849,32 +1872,92 @@ private fun StudioScreen(viewModel: MainViewModel) {
                     onCopy = { viewModel.copyText(state.resultText) },
                 )
             }
+            StudioDisclosure("Opciones de voz y modelo", selectedModel.displayName) {
+                StudioModelSelector(state, viewModel::selectModel)
+                LanguageDropdown(state.selectedLanguageId, !state.busy, viewModel::updateLanguage)
+                selectedVoice?.let { voice ->
+                    if (hasTranscript) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text("Clonar con audio y transcripción", modifier = Modifier.weight(1f))
+                            Switch(checked = state.useIcl, onCheckedChange = viewModel::updateUseIcl, enabled = !state.busy)
+                        }
+                    }
+                    TextButton(onClick = { viewModel.editTranscript(voice) }, enabled = !state.busy) {
+                        Text(if (hasTranscript) "Ver transcripción" else "Agregar transcripción")
+                    }
+                }
+                SamplingPanel(state, viewModel::updateTemperature, viewModel::updateFixedSeed, viewModel::reuseLastSeed)
+            }
         }
 
-        Surface(
-            tonalElevation = 4.dp,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth(),
-        ) {
+        Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            when {
+                state.downloading -> {
+                    Text("Descargando modelo", style = MaterialTheme.typography.labelLarge)
+                    LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                }
+                state.canCancel -> GenerationStats(state)
+                !state.modelReady && !state.busy -> Text("Descargá el modelo para empezar.", style = MaterialTheme.typography.bodySmall)
+            }
             Button(
                 onClick = {
+                    focusManager.clearFocus()
                     if (state.canCancel) viewModel.cancelSynthesis()
+                    else if (!state.modelReady) viewModel.downloadModel()
                     else if (state.backgroundGenerationEnabled && Build.VERSION.SDK_INT >= 33 && !notificationPrompted &&
                         ContextCompat.checkSelfPermission(studioContext, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                         notificationPrompted = true
                         generationNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     } else viewModel.synthesize()
                 },
-                enabled = if (state.canCancel) !state.cancelling else state.modelReady && state.text.isNotBlank() && !state.busy && TextChunks.count(state.text) <= TextChunks.MAX_CHARACTERS,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .height(52.dp),
+                enabled = if (state.canCancel) !state.cancelling else !state.busy &&
+                    (!state.modelReady || (state.text.isNotBlank() && characters <= TextChunks.MAX_CHARACTERS)),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
             ) {
-                Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, modifier = Modifier.size(18.dp))
+                val icon = when {
+                    state.canCancel -> Icons.Default.Stop
+                    !state.modelReady -> Icons.Default.Download
+                    else -> Icons.Default.GraphicEq
+                }
+                Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(when { state.cancelling -> "Cancelando…"; state.canCancel -> "Cancelar generación"; state.busy && !state.downloading -> "Trabajando…"; else -> "Generar" })
+                Text(when {
+                    state.cancelling -> "Cancelando…"
+                    state.canCancel -> "Cancelar generación"
+                    state.downloading -> "Descargando…"
+                    state.busy -> "Trabajando…"
+                    !state.modelReady -> "Descargar modelo"
+                    else -> "Generar audio"
+                })
+            }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StudioDisclosure(title: String, summary: String? = null, content: @Composable () -> Unit) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxWidth()) {
+            Surface(
+                onClick = { expanded = !expanded },
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth().semantics { stateDescription = if (expanded) "Expandido" else "Plegado" },
+            ) {
+                Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(title, style = MaterialTheme.typography.titleMedium)
+                        summary?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                    Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = null)
+                }
+            }
+            if (expanded) {
+                Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    content()
+                }
             }
         }
     }
@@ -2010,7 +2093,7 @@ private fun VoicesScreen(viewModel: MainViewModel) {
 
         ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Voces", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("Voces guardadas", style = MaterialTheme.typography.titleMedium)
                 if (voices.isEmpty()) {
                     Text("Todavía no hay voces guardadas.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
@@ -2220,6 +2303,7 @@ private fun SettingsScreen(viewModel: MainViewModel) {
     val latestText = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) viewModel.exportReportToUri(viewModel.latestReportPath(), uri, true)
     }
+    val hasReport = remember(state.busy, state.resultReportPath) { viewModel.latestReportPath() != null }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2227,79 +2311,96 @@ private fun SettingsScreen(viewModel: MainViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        ModelPanel(
-            state = state,
-            onModelChange = viewModel::selectModel,
-            onDownload = viewModel::downloadModel,
-            onLoad = viewModel::loadModel,
-        )
-        InstalledModelsPanel(state, viewModel::uninstallModel)
-        OutlinedButton(onClick = viewModel::releaseMemory, enabled = !state.busy) { Text("Liberar memoria del modelo") }
-        Text("El modelo se libera automáticamente después de cada generación; cargarlo otra vez puede tardar.", style = MaterialTheme.typography.bodySmall)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Generar en segundo plano", modifier = Modifier.weight(1f))
-            Switch(checked = state.backgroundGenerationEnabled, onCheckedChange = viewModel::updateBackgroundGeneration, enabled = !state.busy)
+        Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Generar en segundo plano", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    Switch(checked = state.backgroundGenerationEnabled, onCheckedChange = viewModel::updateBackgroundGeneration, enabled = !state.busy)
+                }
+                Text(
+                    if (state.backgroundGenerationEnabled) "Permite continuar con la pantalla apagada. En el S23 el bloqueo puede ralentizar la generación."
+                    else "Al salir se cancela la generación y se conservan los fragmentos completos.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (state.backgroundGenerationEnabled && Build.VERSION.SDK_INT >= 33 && !notificationsAllowed) {
+                    TextButton(onClick = { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("Permitir notificación de progreso") }
+                }
+            }
         }
-        Text("Activado: continúa con la pantalla apagada o al usar otra app, con notificación y opción Cancelar. Desactivado: salir de la app cancela y conserva los fragmentos completos. Android aún puede detenerla por límites del sistema.", style = MaterialTheme.typography.bodySmall)
-        if (Build.VERSION.SDK_INT >= 33 && !notificationsAllowed) {
-            OutlinedButton(onClick = { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("Permitir notificación de progreso") }
-            Text("Sin este permiso el aviso puede no aparecer en la barra; podés volver a la app para cancelar.", style = MaterialTheme.typography.bodySmall)
+        StudioDisclosure("Modelos", QwenModel.variantById(state.selectedModelId).displayName) {
+            ModelPanel(state, viewModel::selectModel, viewModel::downloadModel, viewModel::loadModel)
+            InstalledModelsPanel(state, viewModel::uninstallModel)
+            TextButton(onClick = viewModel::releaseMemory, enabled = !state.busy) { Text("Liberar memoria del modelo") }
+            Text(state.status, style = MaterialTheme.typography.bodySmall)
         }
-        Text(state.status, style = MaterialTheme.typography.bodySmall)
-        Text("Último registro disponible: puede pertenecer a una ejecución anterior o interrumpida. El informe identifica su versión y fecha.", style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { latestJson.launch("mi-voz-ultimo-registro.json") }, enabled = !state.busy && viewModel.latestReportPath() != null) { Text("Último JSON") }
-            OutlinedButton(onClick = { latestText.launch("mi-voz-ultimo-registro.txt") }, enabled = !state.busy && viewModel.latestReportPath() != null) { Text("Último TXT") }
-        }
-        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         RuntimePanel(
             state = state,
             onCpuThreadsChange = viewModel::updateCpuThreads,
-            onBackendChange = viewModel::selectBackend,
             onBfdotChange = viewModel::updateExperimentalBfdot,
         )
+        StudioDisclosure("Diagnóstico", if (hasReport) "Último registro disponible" else "Todavía no hay un registro") {
+            TextButton(onClick = { latestJson.launch("mi-voz-ultimo-registro.json") }, enabled = !state.busy && hasReport) { Text("Exportar último JSON") }
+            TextButton(onClick = { latestText.launch("mi-voz-ultimo-registro.txt") }, enabled = !state.busy && hasReport) { Text("Exportar último TXT") }
+        }
+        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 }
 
 @Composable
 private fun ComposerPanel(
     state: QwenTtsUiState,
+    characters: Int,
     selectedVoiceName: String,
+    voiceMode: String,
     onTextChange: (String) -> Unit,
     onVoicePickerClick: () -> Unit,
-    onLanguageChange: (Int) -> Unit,
 ) {
-    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedTextField(
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Surface(color = MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.large) {
+            TextField(
                 value = state.text,
                 onValueChange = onTextChange,
                 modifier = Modifier.fillMaxWidth(),
-                minLines = 6,
-                maxLines = 10,
+                minLines = 4,
+                maxLines = 8,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                label = { Text("Texto para generar") },
+                label = { Text("Texto") },
+                placeholder = { Text("Escribí o pegá lo que querés escuchar") },
                 enabled = !state.busy,
-                isError = TextChunks.count(state.text) > TextChunks.MAX_CHARACTERS,
-                supportingText = { Text("${TextChunks.count(state.text)} / 20.000 caracteres · se divide automáticamente en frases cortas") },
+                isError = characters > TextChunks.MAX_CHARACTERS,
+                supportingText = {
+                    Text(
+                        if (characters > TextChunks.MAX_CHARACTERS) "Máximo de 20.000 caracteres" else "$characters / 20.000 caracteres",
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                    )
+                },
+                textStyle = MaterialTheme.typography.bodyLarge,
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                    disabledContainerColor = Color.Transparent, errorContainerColor = Color.Transparent,
+                    focusedIndicatorColor = MaterialTheme.colorScheme.primary,
+                    unfocusedIndicatorColor = Color.Transparent, disabledIndicatorColor = Color.Transparent,
+                ),
             )
-            OutlinedButton(
-                onClick = onVoicePickerClick,
-                enabled = !state.busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Default.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-                    Text("Voz", style = MaterialTheme.typography.labelMedium)
-                    Text(selectedVoiceName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Surface(
+            onClick = onVoicePickerClick,
+            enabled = !state.busy,
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shape = MaterialTheme.shapes.medium,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.RecordVoiceOver, contentDescription = null)
+                Column(Modifier.weight(1f)) {
+                    Text(selectedVoiceName, style = MaterialTheme.typography.titleMedium)
+                    Text(voiceMode, style = MaterialTheme.typography.bodySmall)
                 }
+                Icon(Icons.Default.ExpandMore, contentDescription = "Elegir voz")
             }
-            LanguageDropdown(
-                selectedLanguageId = state.selectedLanguageId,
-                enabled = !state.busy,
-                onLanguageChange = onLanguageChange,
-            )
         }
     }
 }
@@ -2519,41 +2620,18 @@ private fun ModelPanel(
 private fun RuntimePanel(
     state: QwenTtsUiState,
     onCpuThreadsChange: (Int) -> Unit,
-    onBackendChange: (String) -> Unit,
     onBfdotChange: (Boolean) -> Unit,
 ) {
-    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Icon(Icons.Default.Tune, contentDescription = null)
-                Text("Rendimiento", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            }
+    StudioDisclosure("Rendimiento", "CPU · ${state.selectedCpuThreads} hilos") {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("BFDOT experimental para BF16", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Switch(checked = state.experimentalBfdot, onCheckedChange = onBfdotChange, enabled = !state.busy)
+        }
+        Text("Solo se habilita si Android anuncia soporte. El JSON indica si se usó en cada fragmento.",
+            style = MaterialTheme.typography.bodySmall)
+        Text("Hilos de CPU", style = MaterialTheme.typography.bodySmall)
+        listOf(2, 4, 5, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                backendOptions.forEach { option ->
-                    FilterChip(
-                        selected = state.selectedBackendId == option.id,
-                        onClick = { onBackendChange(option.id) },
-                        enabled = !state.busy,
-                        label = { Text(option.label) },
-                    )
-                }
-            }
-            Text(
-                "Motor efectivo: ${state.activeBackendName ?: "sin confirmar; cargá el modelo"}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text("Esta versión usa solo CPU. GPU fue deshabilitada tras un bloqueo completo del teléfono.", style = MaterialTheme.typography.bodySmall)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("BFDOT experimental para BF16", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                Switch(checked = state.experimentalBfdot, onCheckedChange = onBfdotChange, enabled = !state.busy)
-            }
-            Text("Solo se habilita si Android anuncia soporte. El JSON indica si se usó en cada fragmento.",
-                style = MaterialTheme.typography.bodySmall)
-            Text("Hilos de CPU", style = MaterialTheme.typography.bodySmall)
-            Text("Más hilos no garantizan menor tiempo: compará la misma frase y controlá el calentamiento.", style = MaterialTheme.typography.bodySmall)
-            listOf(2, 4, 5, 6, 8).filter { it <= Runtime.getRuntime().availableProcessors() }.chunked(2).forEach { options ->
-              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 options.forEach { threads ->
                     FilterChip(
                         selected = state.selectedCpuThreads == threads,
@@ -2562,7 +2640,6 @@ private fun RuntimePanel(
                         label = { Text("$threads hilos") },
                     )
                 }
-              }
             }
         }
     }
@@ -2570,45 +2647,35 @@ private fun RuntimePanel(
 
 @Composable
 private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () -> Unit, onJson: () -> Unit, onText: () -> Unit, onCopy: () -> Unit) {
-    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (state.busy && !state.downloading) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                GenerationStats(state)
-            } else {
-                Text(state.resultModelName ?: "Modelo no registrado", fontWeight = FontWeight.SemiBold)
-                OutlinedButton(onClick = onCopy, enabled = state.resultText.isNotEmpty()) { Text("Copiar texto original") }
-                Text("${state.resultBackend ?: "Motor no registrado"} · ${state.resultThreads?.let { "$it hilos" } ?: "Hilos no registrados"} · ${modeLabel(state.resultMode)}", style = MaterialTheme.typography.bodySmall)
-                if (state.resultStatus in listOf("partial", "truncated")) Text("Audio parcial: ${state.resultChunks}/${state.plannedChunks} fragmentos. Revisá el registro antes de usarlo como completo.", color = MaterialTheme.colorScheme.error)
-                if (state.resultTotalMillis > 0) Text("Tiempo total del trabajo: ${formatDuration(state.resultTotalMillis)} · memoria del modelo liberada", style = MaterialTheme.typography.bodySmall)
-                if (state.resultReportPath != null) {
-                    Text("Registro técnico: modelo, ajustes, tiempos y memoria; sin guion ni grabaciones.", style = MaterialTheme.typography.bodySmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onJson) { Text("Registro JSON") }
-                        OutlinedButton(onClick = onText) { Text("Registro TXT") }
-                    }
-                }
-                if (state.sampleCount > 0 && state.sampleRate > 0) {
-                    Text(
-                        "Audio ${formatSeconds(state.sampleCount.toDouble() / state.sampleRate.toDouble())} · generado en ${formatDuration(state.synthesisMillis)} · RTF %.1f".format(Locale.US, state.synthesisMillis.toDouble() / 1000 / (state.sampleCount.toDouble() / state.sampleRate)),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Button(
-                    onClick = { if (state.playing) onStop() else onPlay() },
-                    enabled = state.sampleCount > 0,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp),
-                ) {
-                    Icon(
-                        if (state.playing) Icons.Default.Stop else Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
+    val partial = state.resultStatus in listOf("partial", "truncated")
+    val hasAudio = state.sampleCount > 0 && state.sampleRate > 0
+    val duration = if (hasAudio) state.sampleCount.toDouble() / state.sampleRate else null
+    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                if (partial) "Audio parcial" else if (hasAudio) "Audio listo" else "Registro de generación",
+                style = MaterialTheme.typography.titleLarge,
+                color = if (partial) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            )
+            if (partial) Text("${state.resultChunks} de ${state.plannedChunks} fragmentos completos", style = MaterialTheme.typography.bodySmall)
+            duration?.let { seconds ->
+                Text("${formatSeconds(seconds)} de audio · ${formatDuration(state.resultTotalMillis)} de generación",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedButton(onClick = { if (state.playing) onStop() else onPlay() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Icon(if (state.playing) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text(if (state.playing) "Detener" else "Reproducir")
+                }
+            }
+            StudioDisclosure("Detalles y registros") {
+                state.resultModelName?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                Text(listOfNotNull(state.resultBackend, state.resultThreads?.let { "$it hilos" }, modeLabel(state.resultMode)).joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall)
+                duration?.let { Text("RTF nativo %.1f".format(Locale.US, state.synthesisMillis / 1000.0 / it), style = MaterialTheme.typography.bodySmall) }
+                TextButton(onClick = onCopy, enabled = state.resultText.isNotEmpty()) { Text("Copiar texto original") }
+                if (state.resultReportPath != null) {
+                    TextButton(onClick = onJson) { Text("Exportar registro JSON") }
+                    TextButton(onClick = onText) { Text("Exportar registro TXT") }
                 }
             }
         }
@@ -2617,32 +2684,22 @@ private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () ->
 
 @Composable
 private fun GenerationStats(state: QwenTtsUiState) {
-    val generatedAudioSeconds = state.synthesisFrames * 0.08
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Text(if (state.cancelling) "Cancelación solicitada; el motor debe detenerse antes de liberar la memoria." else state.generationPhase.ifBlank { state.status }, style = MaterialTheme.typography.bodySmall)
-        Text("Fragmento ${state.currentChunk}/${state.plannedChunks} · tiempo total: ${formatDuration(state.operationElapsedMillis)}", style = MaterialTheme.typography.bodySmall)
-        Text("Las estimaciones corresponden al fragmento actual, no al trabajo completo.", style = MaterialTheme.typography.bodySmall)
-        Text("${state.activeBackendName ?: "Motor sin confirmar"} · ${state.cpuThreads} hilos", style = MaterialTheme.typography.bodySmall)
-        if (state.synthesisFrames > 0) {
-            Text("Audio estimado generado: ~${formatSeconds(generatedAudioSeconds)} (todavía sin decodificar)", style = MaterialTheme.typography.bodySmall)
-        }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        Text(if (state.cancelling) "Esperando que se detenga el motor…" else state.generationPhase.ifBlank { state.status },
+            style = MaterialTheme.typography.labelLarge)
+        val elapsed = "Transcurrido ${formatDuration(state.operationElapsedMillis)}"
+        var estimate: String? = null
         if (!state.cancelling) {
             val age = (state.operationElapsedMillis - state.etaObservedAtMillis).coerceAtLeast(0)
             val low = state.etaLowMillis?.minus(age)?.coerceAtLeast(0)
             val high = state.etaHighMillis?.minus(age)?.coerceAtLeast(0)
-            if (high == 0L) {
-                Text("La operación está superando el rango estimado; esperando nuevo progreso.", style = MaterialTheme.typography.bodySmall)
-            } else if (low != null && high != null) {
-                val label = if (state.etaIncludesDecode) "Fin aproximado del fragmento" else "Generación aproximada del fragmento"
-                val clock = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
-                val now = System.currentTimeMillis()
-                Text("$label: entre ${clock.format(java.util.Date(now + low))} y ${clock.format(java.util.Date(now + high))}", style = MaterialTheme.typography.bodySmall)
-                Text("Tiempo restante estimado: ${formatDuration(low)}–${formatDuration(high)}. Puede variar por pausas y temperatura.", style = MaterialTheme.typography.bodySmall)
-                if (!state.etaIncludesDecode) Text("Primera medición: rango amplio; la decodificación final aún no tiene una estimación.", style = MaterialTheme.typography.bodySmall)
-            } else {
-                Text(if (state.generationPhase.startsWith("Decodificando")) "Decodificando audio: todavía no hay datos para estimar esta fase." else "Calculando estimación con el progreso real… La carga y preparación pueden tardar.", style = MaterialTheme.typography.bodySmall)
+            if (low != null && high != null && high > 0L) {
+                val label = if (state.etaIncludesDecode) "restan en el fragmento" else "para terminar de generar"
+                estimate = "~${formatDuration(low)}–${formatDuration(high)} $label"
             }
         }
+        Text(listOfNotNull(elapsed, estimate).joinToString(" · "), style = MaterialTheme.typography.bodySmall)
     }
 }
 
