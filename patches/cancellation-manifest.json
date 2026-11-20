@@ -86,8 +86,22 @@
   },
   {
     "path": "decoder/decoder_layers.cpp",
-    "kind": "decoder_snake",
+    "kind": "decoder_attention",
     "upstream_sha256": "624d804718c9d69d48862207e19ff4f0abacbb639a571235e633a8776520e8f1",
-    "patched_sha256": "1714ae96c8f44347b83d9f52aa15f0ee00c2318016210328c7d06307b63b164d"
+    "patched_sha256": "78f03b3342833579abb18398f32b77d6ded5718be7a9e618f447fe6c4f065ec0",
+    "legacy_sha256": "1714ae96c8f44347b83d9f52aa15f0ee00c2318016210328c7d06307b63b164d",
+    "legacy_kind": "decoder_attention_upgrade"
+  },
+  {
+    "path": "audio_tokenizer_decoder.h",
+    "kind": "decoder_attention_config",
+    "upstream_sha256": "5384293f4c8e8c1426e370d89a92b29ffcdd09116ef6386054df606cededdb44",
+    "patched_sha256": "f57c4d5062f342f61bb237036e0982428081f3e09a999f75609dbb08c4d8ad6d"
+  },
+  {
+    "path": "decoder/decoder_loader.cpp",
+    "kind": "decoder_attention_metadata",
+    "upstream_sha256": "4feb31eb3297273130768362974867ba2fb3fcf619e83da7c7737729350c32f3",
+    "patched_sha256": "a9ad9de91d4d6bb9ac13e93e1c44eb7b09f52afc757fe4c8cc4c1ff8977e5459"
   }
 ]

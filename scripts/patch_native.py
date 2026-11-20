@@ -62,6 +62,22 @@ def transform_cpu_jni(text: str) -> str:
 
 
 def transform(text: str, kind: str) -> str:
+    if kind == "decoder_attention_config":
+        anchor = "    float rope_theta = 10000.0f;"
+        return replace_once(text, anchor, anchor + "\n    uint32_t sliding_window = 0;")
+    if kind == "decoder_attention_metadata":
+        anchor = "    struct gguf_context * gguf_ctx = loader.get_ctx();"
+        return replace_once(text, anchor, anchor + '''
+    const int64_t window_key = gguf_find_key(gguf_ctx, "qwen3-tts-tokenizer.decoder.sliding_window");
+    model.config.sliding_window = window_key >= 0 && gguf_get_kv_type(gguf_ctx, window_key) == GGUF_TYPE_UINT32
+        ? gguf_get_val_u32(gguf_ctx, window_key) : 0;''')
+    if kind == "decoder_attention":
+        text = transform(text, "decoder_snake")
+        return transform(text, "decoder_attention_upgrade")
+    if kind == "decoder_attention_upgrade":
+        text = '#include "mivoz_decoder_attention.h"\n' + text
+        return replace_once(text, "    KQ = ggml_diag_mask_inf(ctx, KQ, 0);",
+                            "    KQ = mivoz_decoder_attention_mask(ctx, KQ, self.impl_->model.config.sliding_window);")
     if kind == "decoder_snake":
         text = '#include "mivoz_decoder_snake.h"\n' + text
         anchor = '    if (alpha_exp && inv_beta_exp) {'
@@ -150,7 +166,8 @@ def apply_native_patches(root: Path = ROOT, check_only: bool = False) -> None:
             raise RuntimeError(f"Native patch output mismatch: {item['path']}")
         pending.append((path, changed))
     headers = [(native / name, (root / "patches" / name).read_text(encoding="utf-8"))
-               for name in ("mivoz_cancellation.h", "mivoz_native_metrics.h", "mivoz_decoder_snake.h")]
+               for name in ("mivoz_cancellation.h", "mivoz_native_metrics.h", "mivoz_decoder_snake.h",
+                            "mivoz_decoder_attention.h")]
     headers.append((root / "external/qwen3-tts.cpp/ggml/src/ggml-cpu/mivoz_bf16_dot.h",
                     (root / "patches/mivoz_bf16_dot.h").read_text(encoding="utf-8")))
     stale_headers = [(path, contents) for path, contents in headers

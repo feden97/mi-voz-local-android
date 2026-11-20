@@ -42,7 +42,7 @@ def main():
     verified = {}
     filenames = ["ggml-cpu.c", "ggml-quants.c", "transformer_runtime_code_pred.cpp", "decoder_runtime.cpp"]
     if args.expect_cpu_runtime:
-        filenames += ["ops.cpp"]
+        filenames += ["ops.cpp", "decoder_layers.cpp", "decoder_loader.cpp"]
     if args.expect_local_asr:
         filenames += ["whisper.cpp", "whisper_reference_jni.cpp", "vec.cpp", "qwen3_tts_jni.cpp", "transformer_generate.cpp"]
     if args.expect_opencl:
