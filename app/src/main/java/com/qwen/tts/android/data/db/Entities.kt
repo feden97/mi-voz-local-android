@@ -35,4 +35,5 @@ data class GenerationEntity(
     val chunkCount: Int? = null,
     val status: String? = null,
     val completedChunks: Int? = null,
+    val readingText: String? = null,
 )
