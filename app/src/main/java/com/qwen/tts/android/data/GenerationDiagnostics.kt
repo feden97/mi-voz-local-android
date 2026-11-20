@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Debug
 import android.os.PowerManager
@@ -52,6 +53,8 @@ internal class GenerationDiagnostics(
     private var peakPssKb = 0
     private var peakNativeBytes = 0L
     private var highestThermalStatus: Int? = null
+    private val batteryManager = app.getSystemService(BatteryManager::class.java)
+    private var observedOnlyUnpluggedDischarge = true
     private val snapshots = JSONArray()
     private val stages = JSONArray()
     private val chunks = JSONArray()
@@ -140,6 +143,7 @@ internal class GenerationDiagnostics(
                 "PSS is process proportional resident memory, not total allocations or model file size.",
                 "Native heap allocated bytes exclude some memory mapped model weights and other allocations.",
                 "Battery temperature is not CPU/GPU/SoC temperature.",
+                "Battery counter differences cover the whole device between the first and last samples. They are reported only when all sampled states show unplugged discharge. A missing, unchanged or increasing counter leaves its estimate unavailable.",
                 "previousProcessExits are historical Android records, not a confirmed cause of the current job's failure. Records may be absent after a reboot; a signal alone does not establish a low-memory kill.",
                 "Memory and thermal peaks are observed samples; short peaks may be missed.",
                 "phaseMillis contains internal native timings; null means the pinned JNI does not expose that metric.",
@@ -234,12 +238,19 @@ internal class GenerationDiagnostics(
                 .put("screenInteractive", power.isInteractive)
                 .put("powerSaveMode", power.isPowerSaveMode)
         }.onFailure { sample.put("androidThermalStatus", JSONObject.NULL) }
-        runCatching {
-            val battery = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val temperature = battery?.getIntExtra("temperature", Int.MIN_VALUE) ?: Int.MIN_VALUE
-            sample.put("batteryTemperatureC", if (temperature in -500..1_500) temperature / 10.0 else JSONObject.NULL)
-            sample.put("batteryStatus", battery?.getIntExtra("status", -1) ?: JSONObject.NULL)
-        }.onFailure { sample.put("batteryTemperatureC", JSONObject.NULL) }
+        val battery = runCatching {
+            app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.getOrNull()
+        val temperature = battery?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+        val status = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)?.takeIf { it > 0 }
+        val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)?.takeIf { it >= 0 }
+        sample.put("batteryTemperatureC", if (temperature in -500..1_500) temperature / 10.0 else JSONObject.NULL)
+            .put("batteryStatus", status ?: JSONObject.NULL)
+            .put("batteryPlugged", plugged ?: JSONObject.NULL)
+        observedOnlyUnpluggedDischarge = observedOnlyUnpluggedDischarge &&
+            status == BatteryManager.BATTERY_STATUS_DISCHARGING && plugged == 0
+        sample.put("batteryChargeCounterMicroAh", batteryCounter(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) ?: JSONObject.NULL)
+            .put("batteryEnergyCounterNanoWh", batteryCounter(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER) ?: JSONObject.NULL)
         if (snapshots.length() >= MAX_SNAPSHOTS) {
             snapshots.remove(1) // Keep the initial sample and recent tail.
             report.put("droppedMemorySamples", ++droppedMemorySamples)
@@ -247,6 +258,9 @@ internal class GenerationDiagnostics(
         sample.put("captureDurationMillis", SystemClock.elapsedRealtime() - now)
         snapshots.put(sample)
     }
+
+    private fun batteryCounter(property: Int): Long? =
+        runCatching { batteryManager?.getLongProperty(property)?.takeIf { it > 0 } }.getOrNull()
 
     @Synchronized
     fun stage(name: String, elapsedMillis: Long) {
@@ -301,9 +315,30 @@ internal class GenerationDiagnostics(
             .put("completedChunks", chunks.length()).put("peakObservedPssKiB", peakPssKb)
             .put("peakObservedNativeHeapBytes", peakNativeBytes)
             .put("highestObservedAndroidThermalStatus", highestThermalStatus ?: JSONObject.NULL)
+        if (snapshots.length() >= 2) {
+            val first = snapshots.getJSONObject(0)
+            val last = snapshots.getJSONObject(snapshots.length() - 1)
+            output.put("batteryUse", batteryUse(first, last, seconds))
+        }
         // Pass a stable error code / exception class, not user text or an original exception containing it.
         if (error != null) output.put("errorCode", DiagnosticFormatting.safeLabel(error))
         report.put("outcome", output).put("finishedAtUtc", Instant.now().toString())
+    }
+
+    private fun batteryUse(first: JSONObject, last: JSONObject, audioSeconds: Double): JSONObject {
+        val output = JSONObject()
+            .put("unpluggedDischargeInAllSamples", observedOnlyUnpluggedDischarge)
+            .put("sampleWindowMillis", last.getLong("elapsedMillis") - first.getLong("elapsedMillis"))
+        if (!observedOnlyUnpluggedDischarge) return output
+
+        val charge = DiagnosticFormatting.counterDrop(first.optLong("batteryChargeCounterMicroAh"),
+            last.optLong("batteryChargeCounterMicroAh"))?.div(1_000.0)
+        val energy = DiagnosticFormatting.counterDrop(first.optLong("batteryEnergyCounterNanoWh"),
+            last.optLong("batteryEnergyCounterNanoWh"))?.div(1_000_000.0)
+        return output.put("deviceChargeUsedMilliAh", charge ?: JSONObject.NULL)
+            .put("deviceEnergyUsedMilliWh", energy ?: JSONObject.NULL)
+            .put("deviceMilliAhPerAudioMinute", DiagnosticFormatting.perAudioMinute(charge, audioSeconds) ?: JSONObject.NULL)
+            .put("deviceMilliWhPerAudioMinute", DiagnosticFormatting.perAudioMinute(energy, audioSeconds) ?: JSONObject.NULL)
     }
 
     /** Journal progress after a completed chunk; latest survives a later interruption without claiming completion. */
@@ -403,6 +438,13 @@ internal class GenerationDiagnostics(
                 appendLine("PSS máximo observado: ${outcome.optInt("peakObservedPssKiB")} KiB")
                 appendLine("Heap nativo máximo observado: ${outcome.optLong("peakObservedNativeHeapBytes")} bytes (no incluye todo el modelo mapeado)")
                 appendLine("Estado térmico Android máximo observado: ${outcome.opt("highestObservedAndroidThermalStatus")}")
+                outcome.optJSONObject("batteryUse")?.let { battery ->
+                    val charge = battery.optDouble("deviceChargeUsedMilliAh").takeIf { it.isFinite() }
+                    val energy = battery.optDouble("deviceEnergyUsedMilliWh").takeIf { it.isFinite() }
+                    val readings = listOfNotNull(charge?.let { "%.1f mAh".format(Locale.US, it) },
+                        energy?.let { "%.1f mWh".format(Locale.US, it) })
+                    appendLine("Consumo estimado del teléfono (ventana muestreada): ${readings.joinToString(" / ").ifEmpty { "sin estimación" }}")
+                }
                 if (outcome.has("errorCode")) appendLine("Código de error: ${outcome.optString("errorCode")}")
             }
             appendLine()
@@ -454,6 +496,11 @@ internal class GenerationDiagnostics(
 
 /** Small pure helpers kept separate from Android calls for host-side unit tests. */
 internal object DiagnosticFormatting {
+    fun counterDrop(first: Long, last: Long): Long? = if (last > 0 && first > last) first - last else null
+
+    fun perAudioMinute(value: Double?, audioSeconds: Double): Double? =
+        value?.takeIf { audioSeconds > 0 }?.let { it * 60 / audioSeconds }
+
     fun rtf(millis: Long, samples: Long, sampleRate: Int): Double? =
         if (millis >= 0 && samples > 0 && sampleRate > 0) millis.toDouble() / 1_000 / (samples.toDouble() / sampleRate) else null
 
