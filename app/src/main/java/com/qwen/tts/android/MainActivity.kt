@@ -135,6 +135,8 @@ import com.qwen.tts.android.data.ModelVariant
 import com.qwen.tts.android.data.QwenModel
 import com.qwen.tts.android.data.VoicePromptFiles
 import com.qwen.tts.android.data.EditableWave
+import com.qwen.tts.android.data.ExpressionAudio
+import com.qwen.tts.android.data.VoiceExpression
 import com.qwen.tts.android.data.WaveEdit
 import com.qwen.tts.android.data.WaveRange
 import com.qwen.tts.android.data.GenerationEstimate
@@ -217,7 +219,7 @@ sealed interface PendingDeletion {
     data class Model(val modelId: String) : PendingDeletion
 }
 
-data class QwenTtsUiState(
+internal data class QwenTtsUiState(
     val editor: TextFieldValue = TextFieldValue("Hola, esta es una prueba de mi voz generada de forma local en el teléfono."),
     val originalText: String? = null,
     val selectedModelId: String = QwenModel.defaultVariant.id,
@@ -266,8 +268,8 @@ data class QwenTtsUiState(
     val resultText: String = "",
     val resultReadingText: String? = null,
     val previewInProgress: Boolean = false,
-    val previewText: String? = null,
-    val previewSourceId: Long? = null,
+    val preview: AudioPreview? = null,
+    val previewCanSave: Boolean = false,
     val previewPlaying: Boolean = false,
     val previewMessage: String? = null,
     val resultBackend: String? = null,
@@ -337,7 +339,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             favoriteModelIds = preferences.getStringSet("favorite-model-ids", emptySet()).orEmpty().toSet(),
         ),
     )
-    val uiState = _uiState.asStateFlow()
+    internal val uiState = _uiState.asStateFlow()
 
     @Volatile private var engine: QwenEngine? = null
     private val cancelRequested = AtomicBoolean(false)
@@ -894,8 +896,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    internal fun synthesizePreview(value: String, source: AudioEditorDocument? = null) {
-        val text = value.trim()
+    internal fun synthesizePreview(request: AudioPreview.Phrase, source: AudioEditorDocument? = null) {
+        require(request.sourceId == source?.generation?.generationId)
+        val text = request.text
         val current = _uiState.value
         if (current.busy || recorderState.value.isRecording || text.isEmpty() ||
             TextChunks.count(text) > ReadingText.PREVIEW_CHARACTERS) return
@@ -919,11 +922,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var message: String? = null
             try {
                 withContext(Dispatchers.IO) {
-                    val voiceId = if (source == null) current.selectedVoiceId else source.generation.voiceId
+                    val defaultVoiceId = if (source == null) current.selectedVoiceId else source.generation.voiceId
+                    val voiceId = request.referenceVoiceId ?: defaultVoiceId
                     val selectedVoice = voiceId?.let { dao.getVoice(it) ?: error("La voz de este audio no está disponible.") }
                     val originalMode = source?.generation?.cloningMode
-                    val useIcl = if (originalMode == null) current.useIcl else originalMode == "icl"
+                    val useIcl = request.referenceVoiceId != null || (originalMode?.let { it == "icl" } ?: current.useIcl)
                     val transcript = synthesisTranscript(selectedVoice, useIcl)
+                    check(request.referenceVoiceId == null || transcript.isNotBlank()) { "La referencia expresiva necesita su transcripción." }
                     check(originalMode != "icl" || transcript.isNotBlank()) { "La voz necesita su transcripción para generar otra toma." }
                     if (variant.id != current.selectedModelId) synchronized(nativeLock) {
                         engine?.close()
@@ -945,7 +950,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         throwIfCancelRequested(native)
                         val audio = result.audio
                         check(result.success && audio != null && audio.isNotEmpty()) { result.errorMsg ?: "El motor no produjo audio." }
-                        StreamingWavWriter(previewFile).use { it.append(audio, result.sampleRate) }
+                        if (request.expression == VoiceExpression.NATURAL) {
+                            StreamingWavWriter(previewFile, result.sampleRate).use { it.append(audio, result.sampleRate) }
+                        } else {
+                            val raw = File.createTempFile("phrase-", ".wav", previewFile.parentFile)
+                            try {
+                                StreamingWavWriter(raw, result.sampleRate).use { it.append(audio, result.sampleRate) }
+                                _uiState.update { it.copy(generationPhase = "Ajustando la expresión") }
+                                ExpressionAudio.render(raw, previewFile, WaveRange(0, audio.size.toLong()), request.expression)
+                            } finally {
+                                raw.delete()
+                            }
+                        }
                         takeComplete = framesSeen < params.maxAudioTokens && audio.size < params.maxAudioTokens * 1920
                         if (!takeComplete) message = "La prueba llegó al límite de audio. Probá con un tramo más corto."
                     }
@@ -960,8 +976,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 stopBusyTicker()
                 val cancelled = cancelRequested.get()
                 _uiState.update { it.copy(busy = false, canCancel = false, cancelling = false,
-                    generationPhase = "", previewInProgress = false, previewText = text.takeIf { resultAvailable },
-                    previewSourceId = source?.generation?.generationId?.takeIf { resultAvailable && takeComplete },
+                    generationPhase = "", previewInProgress = false, preview = request.takeIf { resultAvailable },
+                    previewCanSave = resultAvailable && takeComplete && source != null,
                     status = if (it.modelReady) "Modelo listo" else "Modelo sin descargar",
                     previewMessage = if (cancelled) "Prueba cancelada." else message) }
             }
@@ -969,15 +985,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    internal fun previewExpression(source: AudioEditorDocument, request: AudioPreview.Selection) {
+        require(request.sourceId == source.generation.generationId)
+        if (_uiState.value.busy || request.expression == VoiceExpression.NATURAL) return
+        clearPreview()
+        stopAudio()
+        startBusy("Ajustando la expresión")
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    ExpressionAudio.render(source.file, previewFile, request.range, request.expression)
+                }
+            }
+            stopBusyTicker()
+            _uiState.update { it.copy(busy = false, status = if (it.modelReady) "Modelo listo" else "Modelo sin descargar",
+                preview = request.takeIf { result.isSuccess }, previewCanSave = result.isSuccess,
+                previewMessage = result.exceptionOrNull()?.let { error -> error.message ?: "No se pudo ajustar la expresión." }) }
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            if (result.isSuccess && GenerationRuntime.isUiVisible) playPreview()
+        }
+    }
+
     fun playPreview() {
-        if (!_uiState.value.busy && _uiState.value.previewText != null) playPreviewFile()
+        if (!_uiState.value.busy && _uiState.value.preview != null) playPreviewFile()
     }
 
     fun clearPreview() {
         if (_uiState.value.previewInProgress) return
         if (activePlayerIsPreview) stopAudio()
-        if (_uiState.value.previewText != null) previewFile.delete()
-        _uiState.update { it.copy(previewText = null, previewSourceId = null, previewMessage = null) }
+        if (_uiState.value.preview != null) previewFile.delete()
+        _uiState.update { it.copy(preview = null, previewCanSave = false, previewMessage = null) }
     }
 
     private fun resolveSampling(): ResolvedGenerationSampling {
@@ -1217,20 +1254,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    internal fun saveAudioEdit(source: AudioEditorDocument, range: WaveRange, edit: WaveEdit, takeText: String? = null) {
+    internal fun saveAudioEdit(source: AudioEditorDocument, range: WaveRange, edit: WaveEdit, preview: AudioPreview? = null) {
         val current = _uiState.value
         if (current.busy) return
         val sourceId = source.generation.generationId
         val takesAudio = edit == WaveEdit.REPLACE || edit == WaveEdit.INSERT
-        if (takesAudio && (current.previewSourceId != sourceId || current.previewText != takeText?.trim())) {
-            _audioEditSave.value = AudioEditSave(sourceId, error = "Generá una toma de ese texto antes de guardar.")
+        val matchingSelection = preview !is AudioPreview.Selection || (edit == WaveEdit.REPLACE && preview.range == range)
+        if (takesAudio && (!current.previewCanSave || preview?.sourceId != sourceId || current.preview != preview || !matchingSelection)) {
+            _audioEditSave.value = AudioEditSave(sourceId, error = "Prepará de nuevo esta edición antes de guardar.")
             return
         }
-        val label = when (edit) {
+        val action = when (edit) {
             WaveEdit.KEEP -> "Recorte"
             WaveEdit.REMOVE -> "Tramo eliminado"
             WaveEdit.REPLACE -> "Tramo reemplazado"
             WaveEdit.INSERT -> "Toma insertada"
+        }
+        val label = when {
+            preview is AudioPreview.Selection -> "Expresión: ${preview.expression.label}"
+            preview != null && preview.expression != VoiceExpression.NATURAL -> "$action · ${preview.expression.label}"
+            else -> action
         }
         stopAudio()
         _audioEditSave.value = AudioEditSave(sourceId, saving = true)
@@ -2099,9 +2142,10 @@ private fun StudioScreen(viewModel: MainViewModel, onEditAudio: (Long) -> Unit) 
             state = state,
             draft = draft,
             voiceName = selectedVoiceName,
+            references = voices.filter { !transcripts[it.voiceId].isNullOrBlank() },
             onChange = { previewDraft = it },
             onDismiss = { viewModel.clearPreview(); previewDraft = null },
-            onGenerate = { viewModel.synthesizePreview(draft) },
+            onGenerate = { viewModel.synthesizePreview(it) },
             onCancel = viewModel::cancelSynthesis,
             onPlay = viewModel::playPreview,
             onStop = viewModel::stopAudio,
@@ -2283,16 +2327,21 @@ private fun PhrasePreviewDialog(
     state: QwenTtsUiState,
     draft: String,
     voiceName: String,
+    references: List<VoiceProfileEntity>,
     onChange: (String) -> Unit,
     onDismiss: () -> Unit,
-    onGenerate: () -> Unit,
+    onGenerate: (AudioPreview.Phrase) -> Unit,
     onCancel: () -> Unit,
     onPlay: () -> Unit,
     onStop: () -> Unit,
 ) {
     val count = remember(draft) { TextChunks.count(draft.trim()) }
     val tooLong = count > ReadingText.PREVIEW_CHARACTERS
-    val previewAvailable = state.previewText == draft.trim()
+    var expression by rememberSaveable { mutableStateOf(VoiceExpression.NATURAL) }
+    var referenceId by rememberSaveable { mutableStateOf<String?>(null) }
+    val request = AudioPreview.Phrase(draft.trim(), expression, referenceId)
+    val previewAvailable = state.preview == request
+    val referenceAvailable = referenceId == null || references.any { it.voiceId == referenceId }
     AlertDialog(
         onDismissRequest = { if (!state.previewInProgress) onDismiss() },
         title = { Text("Probar una frase") },
@@ -2306,6 +2355,8 @@ private fun PhrasePreviewDialog(
                         else "$count / ${ReadingText.PREVIEW_CHARACTERS} caracteres") },
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 )
+                ExpressionPicker(expression, !state.busy) { onStop(); expression = it }
+                ExpressiveReferencePicker(references, referenceId, !state.busy) { onStop(); referenceId = it }
                 if (state.previewInProgress) GenerationStats(state)
                 state.previewMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 if (!state.previewInProgress && (previewAvailable || state.previewPlaying)) {
@@ -2323,8 +2374,8 @@ private fun PhrasePreviewDialog(
                 TextButton(onClick = onCancel, enabled = !state.cancelling) { Text("Cancelar prueba") }
             } else {
                 val focusManager = LocalFocusManager.current
-                TextButton(onClick = { focusManager.clearFocus(); onGenerate() },
-                    enabled = !state.busy && state.modelReady && count > 0 && !tooLong) { Text("Generar prueba") }
+                TextButton(onClick = { focusManager.clearFocus(); onGenerate(request) },
+                    enabled = !state.busy && state.modelReady && count > 0 && !tooLong && referenceAvailable) { Text("Generar prueba") }
             }
         },
     )

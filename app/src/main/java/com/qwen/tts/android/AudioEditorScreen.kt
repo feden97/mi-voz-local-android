@@ -60,10 +60,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.qwen.tts.android.data.ReadingText
 import com.qwen.tts.android.data.TextChunks
+import com.qwen.tts.android.data.VoiceExpression
 import com.qwen.tts.android.data.WaveEdit
 import com.qwen.tts.android.data.WaveLayout
 import com.qwen.tts.android.data.WaveRange
 import com.qwen.tts.android.data.db.GenerationEntity
+import com.qwen.tts.android.data.db.VoiceProfileEntity
 import java.io.File
 import java.util.Locale
 import kotlin.math.roundToLong
@@ -91,7 +93,7 @@ internal fun AudioEditorScreen(viewModel: MainViewModel, generationId: Long, onC
     val state by viewModel.uiState.collectAsState()
     val savedEdit by viewModel.audioEditSave.collectAsState()
     val save = savedEdit?.takeIf { it.sourceId == generationId }
-    val keepOpen = state.previewInProgress || save?.saving == true
+    val keepOpen = state.busy
     var source by remember(generationId) { mutableStateOf<AudioEditorDocument?>(null) }
     var loadError by remember(generationId) { mutableStateOf<String?>(null) }
 
@@ -155,6 +157,7 @@ private fun AudioEditorControls(viewModel: MainViewModel, source: AudioEditorDoc
     var start by rememberSaveable(source.generation.generationId) { mutableStateOf(0L) }
     var end by rememberSaveable(source.generation.generationId) { mutableStateOf(duration) }
     var takeText by rememberSaveable(source.generation.generationId) { mutableStateOf<String?>(null) }
+    var showExpression by rememberSaveable(source.generation.generationId) { mutableStateOf(false) }
     var jumpText by rememberSaveable(source.generation.generationId) { mutableStateOf<String?>(null) }
     var sliderPosition by remember(source.file) { mutableStateOf<Float?>(null) }
     val canPlay = player.ready && !state.busy && !state.previewPlaying
@@ -232,6 +235,12 @@ private fun AudioEditorControls(viewModel: MainViewModel, source: AudioEditorDoc
         OutlinedButton(onClick = { player.playRange(start, end) }, enabled = canPlay && hasSelection, modifier = Modifier.fillMaxWidth()) {
             Text("Escuchar selección")
         }
+        Button(onClick = {
+            player.pause()
+            viewModel.clearPreview()
+            viewModel.clearAudioEditSave()
+            showExpression = true
+        }, enabled = !state.busy && hasSelection, modifier = Modifier.fillMaxWidth()) { Text("Cambiar expresión") }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { player.pause(); viewModel.saveAudioEdit(source, selected, WaveEdit.KEEP) },
                 enabled = !state.busy && hasSelection && !wholeTrack, modifier = Modifier.weight(1f)) {
@@ -252,6 +261,48 @@ private fun AudioEditorControls(viewModel: MainViewModel, source: AudioEditorDoc
         if (save?.saving == true) LinearProgressIndicator(Modifier.fillMaxWidth())
         save?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
+    if (showExpression) {
+        var expression by rememberSaveable { mutableStateOf(VoiceExpression.NATURAL) }
+        val request = AudioPreview.Selection(source.generation.generationId, selected, expression)
+        val ready = state.preview == request && state.previewCanSave && !state.busy
+        AlertDialog(
+            onDismissRequest = {
+                if (!state.busy) { player.pause(); viewModel.clearPreview(); showExpression = false }
+            },
+            title = { Text("Cambiar expresión") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${timelineClock(start)} a ${timelineClock(end)}", style = MaterialTheme.typography.labelLarge)
+                    ExpressionPicker(expression, !state.busy) { viewModel.stopAudio(); expression = it }
+                    OutlinedButton(onClick = { viewModel.stopAudio(); player.playRange(start, end) },
+                        enabled = player.ready && !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Escuchar original") }
+                    OutlinedButton(onClick = {
+                        player.pause()
+                        when {
+                            state.previewPlaying -> viewModel.stopAudio()
+                            ready -> viewModel.playPreview()
+                            else -> viewModel.previewExpression(source, request)
+                        }
+                    }, enabled = expression != VoiceExpression.NATURAL && !state.busy,
+                        modifier = Modifier.fillMaxWidth()) {
+                        Text(if (state.previewPlaying) "Detener prueba" else "Escuchar con expresión")
+                    }
+                    if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    (save?.error ?: state.previewMessage)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { player.pause(); viewModel.clearPreview(); showExpression = false }, enabled = !state.busy) {
+                    Text("Cerrar")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { player.pause(); viewModel.saveAudioEdit(source, selected, WaveEdit.REPLACE, request) }, enabled = ready) {
+                    Text("Guardar copia")
+                }
+            },
+        )
+    }
     jumpText?.let { text ->
         val requested = parseTimelineTime(text)?.takeIf { it <= duration }
         AlertDialog(
@@ -271,16 +322,20 @@ private fun AudioEditorControls(viewModel: MainViewModel, source: AudioEditorDoc
         )
     }
     takeText?.let { draft ->
+        val voices by viewModel.voices.collectAsState()
+        val transcripts by viewModel.voiceTranscripts.collectAsState()
         val cursor = source.layout.frameAt(player.position)
         val selectionTime = if (hasSelection) "${timelineClock(start)} a ${timelineClock(end)}" else null
         NewTakeDialog(state, source, draft, selectionTime, timelineClock(player.position), save?.error,
+            references = voices.filter { !transcripts[it.voiceId].isNullOrBlank() },
             onChange = { takeText = it },
             onDismiss = { viewModel.clearPreview(); takeText = null },
-            onGenerate = { viewModel.synthesizePreview(draft, source) },
+            onGenerate = { viewModel.synthesizePreview(it, source) },
             onCancel = viewModel::cancelSynthesis,
             onListen = { if (state.previewPlaying) viewModel.stopAudio() else viewModel.playPreview() },
-            onReplace = { viewModel.saveAudioEdit(source, selected, WaveEdit.REPLACE, draft) },
-            onInsert = { viewModel.saveAudioEdit(source, WaveRange(cursor, cursor), WaveEdit.INSERT, draft) },
+            onStop = viewModel::stopAudio,
+            onReplace = { viewModel.saveAudioEdit(source, selected, WaveEdit.REPLACE, it) },
+            onInsert = { viewModel.saveAudioEdit(source, WaveRange(cursor, cursor), WaveEdit.INSERT, it) },
         )
     }
 }
@@ -317,13 +372,18 @@ private fun AudioWaveform(
 @Composable
 private fun NewTakeDialog(
     state: QwenTtsUiState, source: AudioEditorDocument, draft: String, selectionTime: String?, insertionTime: String,
-    error: String?, onChange: (String) -> Unit, onDismiss: () -> Unit, onGenerate: () -> Unit,
-    onCancel: () -> Unit, onListen: () -> Unit, onReplace: () -> Unit, onInsert: () -> Unit,
+    error: String?, references: List<VoiceProfileEntity>, onChange: (String) -> Unit, onDismiss: () -> Unit,
+    onGenerate: (AudioPreview.Phrase) -> Unit, onCancel: () -> Unit, onListen: () -> Unit, onStop: () -> Unit,
+    onReplace: (AudioPreview.Phrase) -> Unit, onInsert: (AudioPreview.Phrase) -> Unit,
 ) {
     val count = remember(draft) { TextChunks.count(draft.trim()) }
     val limit = ReadingText.PREVIEW_CHARACTERS
-    val canListen = state.previewText == draft.trim() && count > 0
-    val takeReady = canListen && state.previewSourceId == source.generation.generationId && !state.busy
+    var expression by rememberSaveable { mutableStateOf(VoiceExpression.NATURAL) }
+    var referenceId by rememberSaveable { mutableStateOf<String?>(null) }
+    val request = AudioPreview.Phrase(draft.trim(), expression, referenceId, source.generation.generationId)
+    val canListen = state.preview == request
+    val takeReady = canListen && state.previewCanSave && !state.busy
+    val referenceAvailable = referenceId == null || references.any { it.voiceId == referenceId }
     AlertDialog(
         onDismissRequest = { if (!state.busy) onDismiss() },
         title = { Text("Generar toma nueva") },
@@ -335,11 +395,14 @@ private fun NewTakeDialog(
                 OutlinedTextField(value = draft, onValueChange = onChange, enabled = !state.busy, minLines = 2, maxLines = 4,
                     label = { Text("Texto de la toma") }, isError = count > limit,
                     supportingText = { Text("$count / $limit caracteres") }, modifier = Modifier.fillMaxWidth())
+                ExpressionPicker(expression, !state.busy) { onStop(); expression = it }
+                ExpressiveReferencePicker(references, referenceId, !state.busy) { onStop(); referenceId = it }
                 if (state.previewInProgress) GenerationStats(state)
                 state.previewMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 if (!state.busy) {
-                    OutlinedButton(onClick = { focus.clearFocus(); onGenerate() }, enabled = count in 1..limit, modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = { focus.clearFocus(); onGenerate(request) }, enabled = count in 1..limit && referenceAvailable,
+                        modifier = Modifier.fillMaxWidth()) {
                         Text(if (canListen) "Generar otra toma" else "Generar")
                     }
                     if (canListen || state.previewPlaying) {
@@ -349,7 +412,7 @@ private fun NewTakeDialog(
                     }
                     if (takeReady) {
                         selectionTime?.let { Text("Selección de $it", style = MaterialTheme.typography.bodySmall) }
-                        TextButton(onClick = onInsert, modifier = Modifier.fillMaxWidth()) { Text("Insertar en $insertionTime") }
+                        TextButton(onClick = { onInsert(request) }, modifier = Modifier.fillMaxWidth()) { Text("Insertar en $insertionTime") }
                     }
                 } else if (!state.previewInProgress) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -361,7 +424,7 @@ private fun NewTakeDialog(
             if (state.previewInProgress) {
                 TextButton(onClick = onCancel, enabled = !state.cancelling) { Text("Cancelar toma") }
             } else if (takeReady && selectionTime != null) {
-                TextButton(onClick = onReplace) { Text("Reemplazar selección") }
+                TextButton(onClick = { onReplace(request) }) { Text("Reemplazar selección") }
             }
         },
     )
